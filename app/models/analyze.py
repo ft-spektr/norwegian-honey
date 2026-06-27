@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class AuthResultStatus(str, Enum):
@@ -55,6 +55,13 @@ class HeaderAnalysisRequest(BaseModel):
 
     raw_headers: str | None = None
     raw_email: str | None = None
+
+    @field_validator("raw_headers", "raw_email")
+    @classmethod
+    def _reject_oversized(cls, value: str | None) -> str | None:
+        if value is not None and len(value) > 524_288:
+            raise ValueError("Input exceeds maximum size")
+        return value
 
 
 class HeaderAnalysisResponse(BaseModel):

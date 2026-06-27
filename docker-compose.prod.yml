@@ -10,9 +10,14 @@ services:
     environment:
       DEBUG: "false"
       TRUSTED_PROXY_HEADERS: "true"
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+      INVESTIGATOR_API_KEY: ${INVESTIGATOR_API_KEY:?Set INVESTIGATOR_API_KEY in .env}
 
   caddy:
-    image: caddy:2-alpine
+    build:
+      context: ./deploy
+      dockerfile: Dockerfile.caddy
+    image: norwegian-honey-caddy
     restart: unless-stopped
     ports:
       - "80:80"

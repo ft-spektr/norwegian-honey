@@ -1,17 +1,76 @@
 # Caddy reverse proxy — automatic HTTPS via Let's Encrypt.
 # Set DOMAIN in .env before starting (DNS A record must point to this VPS).
+#
+# Rate limits are per client IP ({remote_host}). Requires custom Caddy image
+# (deploy/Dockerfile.caddy) with github.com/mholt/caddy-ratelimit.
 
 {$DOMAIN} {
 	encode gzip
 
+	# Hide API surface from reconnaissance after canary discovery
+	@blocked path /openapi.json /docs /redoc
+	handle @blocked {
+		respond 404
+	}
+
+	# Reject oversized uploads before they reach the API
+	request_body {
+		max_size 2MB
+	}
+
+	rate_limit {
+		# Global cap — catch-all abuse
+		zone global {
+			key {remote_host}
+			events 120
+			window 1m
+		}
+
+		# Header / .eml analysis — CPU + DNS heavy
+		zone analyze {
+			match {
+				path /analyze/*
+			}
+			key {remote_host}
+			events 20
+			window 1m
+		}
+
+		# OSINT — external API quota + cost
+		zone osint {
+			match {
+				path /osint/*
+			}
+			key {remote_host}
+			events 30
+			window 1m
+		}
+
+		# Canary pixels — allow mail-client retries, block floods
+		zone canary {
+			match {
+				path /images/*
+			}
+			key {remote_host}
+			events 60
+			window 1m
+		}
+	}
+
+	handle_errors 429 {
+		header {
+			-Server
+			Retry-After 60
+		}
+		respond "Too Many Requests" 429
+	}
+
 	reverse_proxy api:8000 {
-		# Preserve client IP for canary logging
 		header_up X-Forwarded-For {remote_host}
 		header_up X-Real-IP {remote_host}
 		header_up X-Forwarded-Proto {scheme}
 	}
 
-	# OpSec: hide upstream server identity
 	header {
 		-Server
 	}

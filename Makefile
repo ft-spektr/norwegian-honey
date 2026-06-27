@@ -8,11 +8,20 @@
 
 # --- Client config (production URL, SSH for remote logs) ---
 -include make.env
+-include .env
 
 DOMAIN         ?= spek-tr.no
 PROD_URL       ?= https://$(DOMAIN)
 LOCAL_URL      ?= http://127.0.0.1:8000
 API_URL        ?= $(PROD_URL)
+INVESTIGATOR_API_KEY ?=
+
+# curl auth header for protected /analyze and /osint endpoints
+ifneq ($(INVESTIGATOR_API_KEY),)
+  API_AUTH = -H "X-API-Key: $(INVESTIGATOR_API_KEY)"
+else
+  API_AUTH =
+endif
 
 PROD_SSH       ?= root@your-vps-ip
 PROD_SSH_KEY   ?= $(HOME)/.ssh/norwegian-honey
@@ -130,23 +139,27 @@ domain-ip:
 analyze-headers: ## [prod] POST /analyze/headers (HEADERS=path)
 	@test -n "$(HEADERS)" || (echo "Usage: make analyze-headers HEADERS=path/to/headers.txt"; exit 1)
 	curl -s -X POST "$(API_URL)/analyze/headers" \
+		$(API_AUTH) \
 		-H "Content-Type: application/json" \
 		-d "$$($(PYTHON) -c "import json, pathlib; print(json.dumps({'raw_headers': pathlib.Path('$(HEADERS)').read_text()}))")" \
 		$(FORMAT)
 
 analyze-headers-sample: ## [prod] POST /analyze/headers (built-in sample)
 	curl -s -X POST "$(API_URL)/analyze/headers" \
+		$(API_AUTH) \
 		-H "Content-Type: application/json" \
 		-d '{"raw_headers":"From: scammer@evil-phish.example\nReply-To: collector@different-bad.example\nReturn-Path: <bounce@evil-phish.example>\nSubject: Urgent wire transfer\nAuthentication-Results: mx.example.com; spf=fail; dkim=fail; dmarc=fail\nReceived: from mail.badactor.example ([198.51.100.10]) by mx.example.com; Mon, 1 Jan 2024 11:59:00 +0000\nX-Originating-IP: [203.0.113.99]\n"}' \
 		$(FORMAT)
 
 analyze-eml: ## [prod] POST /analyze/eml (EML=path)
 	curl -s -X POST "$(API_URL)/analyze/eml" \
+		$(API_AUTH) \
 		-F "file=@$(EML)" \
 		$(FORMAT)
 
 osint-query: ## [prod] POST /osint/query (IPS= DOMAINS= EMAILS=)
 	curl -s -X POST "$(API_URL)/osint/query" \
+		$(API_AUTH) \
 		-H "Content-Type: application/json" \
 		-d "$$($(PYTHON) -c "import json; ips=[x for x in '$(IPS)'.split(',') if x]; domains=[x for x in '$(DOMAINS)'.split(',') if x]; emails=[x for x in '$(EMAILS)'.split(',') if x]; print(json.dumps({'ips': ips, 'domains': domains, 'emails': emails}))")" \
 		$(FORMAT)
@@ -157,21 +170,36 @@ osint-query-sample: ## [prod] POST /osint/query (8.8.8.8, example.com)
 osint-from-analysis: ## [prod] POST /osint/from-analysis (ANALYSIS=file.json)
 	@test -n "$(ANALYSIS)" || (echo "Usage: make osint-from-analysis ANALYSIS=analysis.json"; exit 1)
 	curl -s -X POST "$(API_URL)/osint/from-analysis" \
+		$(API_AUTH) \
 		-H "Content-Type: application/json" \
 		-d "@$(ANALYSIS)" \
 		$(FORMAT)
 
 osint-from-sample: ## [prod] Analyze sample → OSINT pipeline
 	curl -s -X POST "$(API_URL)/analyze/headers" \
+		$(API_AUTH) \
 		-H "Content-Type: application/json" \
 		-d '{"raw_headers":"From: scammer@evil-phish.example\nReply-To: collector@different-bad.example\nAuthentication-Results: mx.example.com; spf=fail; dkim=fail; dmarc=fail\nReceived: from mail.badactor.example ([198.51.100.10]) by mx.example.com; Mon, 1 Jan 2024 11:59:00 +0000\nX-Originating-IP: [203.0.113.99]\n"}' \
 	| curl -s -X POST "$(API_URL)/osint/from-analysis" \
+		$(API_AUTH) \
 		-H "Content-Type: application/json" \
 		-d @- \
 		$(FORMAT)
 
-canary-token: ## [prod] Generate canary embed for $(PROD_URL)
-	$(PYTHON) scripts/generate_canary_token.py --base-url "$(API_URL)" --count 1
+canary-token: ## [prod] Generate canary embed + register on VPS
+	@OUT="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(API_URL)" --count 1 --json)"; \
+	echo "$$OUT" | $(PYTHON) -m json.tool; \
+	TOKEN="$$($(PYTHON) -c "import json,sys; print(json.loads(sys.argv[1])['token'])" "$$OUT")"; \
+	$(MAKE) prod-canary-register TOKEN="$$TOKEN"
+
+canary-register: ## [prod] Register existing TOKEN in local DB
+	@test -n "$(TOKEN)" || (echo "Usage: make canary-register TOKEN=your-token"; exit 1)
+	$(PYTHON) scripts/register_canary_token.py "$(TOKEN)" --db-path $(CANARY_DB)
+
+prod-canary-register: ## [prod] Register TOKEN on VPS via SSH
+	@test -n "$(TOKEN)" || (echo "Usage: make prod-canary-register TOKEN=your-token"; exit 1)
+	$(SSH_CMD) "cd $(PROD_REMOTE_DIR) && docker compose exec -T $(DOCKER_SERVICE) \
+		python scripts/register_canary_token.py '$(TOKEN)' --db-path $(DOCKER_CANARY_DB)"
 
 canary-hit: ## [prod] Trigger pixel (TOKEN=required)
 	@test -n "$(TOKEN)" || (echo "Usage: make canary-hit TOKEN=your-token"; exit 1)
@@ -179,10 +207,11 @@ canary-hit: ## [prod] Trigger pixel (TOKEN=required)
 		"$(API_URL)/images/$(TOKEN).png" \
 		-o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"
 
-canary-demo: ## [prod] Generate token, hit pixel on cloud
+canary-demo: ## [prod] Generate token, register on VPS, hit pixel on cloud
 	@TOKEN="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(API_URL)" --count 1 --json \
 		| $(PYTHON) -c "import sys,json; print(json.load(sys.stdin)['token'])")"; \
 	echo "token: $$TOKEN"; \
+	$(MAKE) prod-canary-register TOKEN="$$TOKEN"; \
 	curl -s -H "User-Agent: Makefile-Test/1.0" \
 		"$(API_URL)/images/$$TOKEN.png" \
 		-o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"; \
@@ -238,8 +267,13 @@ local-osint-from-analysis: ## POST /osint/from-analysis on localhost
 local-osint-from-sample: ## Analyze → OSINT on localhost
 	$(MAKE) osint-from-sample API_URL=$(LOCAL_URL)
 
-local-canary-token: ## Generate canary token for localhost
-	$(PYTHON) scripts/generate_canary_token.py --base-url "$(LOCAL_URL)" --count 1
+local-canary-token: ## Generate + register canary token for localhost
+	$(PYTHON) scripts/generate_canary_token.py --base-url "$(LOCAL_URL)" --count 1 \
+		--register-db $(CANARY_DB)
+
+local-canary-register: ## Register TOKEN in local DB
+	@test -n "$(TOKEN)" || (echo "Usage: make local-canary-register TOKEN=your-token"; exit 1)
+	$(PYTHON) scripts/register_canary_token.py "$(TOKEN)" --db-path $(CANARY_DB)
 
 local-canary-hit: ## Trigger pixel on localhost (TOKEN=)
 	@test -n "$(TOKEN)" || (echo "Usage: make local-canary-hit TOKEN=your-token"; exit 1)
@@ -247,10 +281,11 @@ local-canary-hit: ## Trigger pixel on localhost (TOKEN=)
 		"$(LOCAL_URL)/images/$(TOKEN).png" \
 		-o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"
 
-local-canary-demo: ## Generate token, hit pixel locally, show DB
+local-canary-demo: ## Generate token, register, hit pixel locally, show DB
 	@TOKEN="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(LOCAL_URL)" --count 1 --json \
 		| $(PYTHON) -c "import sys,json; print(json.load(sys.stdin)['token'])")"; \
 	echo "token: $$TOKEN"; \
+	$(MAKE) local-canary-register TOKEN="$$TOKEN"; \
 	curl -s -H "User-Agent: Makefile-Test/1.0" \
 		"$(LOCAL_URL)/images/$$TOKEN.png" \
 		-o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"; \

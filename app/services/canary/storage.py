@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -19,6 +19,9 @@ class CanaryStorage(ABC):
 
     @abstractmethod
     async def record_hit(self, hit: CanaryHitRecord) -> CanaryHitResponse: ...
+
+    @abstractmethod
+    async def prune_old_hits(self, retention_days: int) -> int: ...
 
 
 class SQLiteCanaryStorage(CanaryStorage):
@@ -44,6 +47,9 @@ class SQLiteCanaryStorage(CanaryStorage):
             )
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_canary_token ON canary_hits(token)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_canary_timestamp ON canary_hits(timestamp)"
             )
             await db.commit()
 
@@ -74,6 +80,21 @@ class SQLiteCanaryStorage(CanaryStorage):
             client_ip=hit.client_ip,
             timestamp=hit.timestamp,
         )
+
+    async def prune_old_hits(self, retention_days: int) -> int:
+        if retention_days <= 0:
+            return 0
+        cutoff = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        cutoff = (cutoff - timedelta(days=retention_days)).isoformat()
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM canary_hits WHERE timestamp < ?",
+                (cutoff,),
+            )
+            await db.commit()
+            return cursor.rowcount or 0
 
 
 class InfluxCanaryStorage(CanaryStorage):
@@ -121,6 +142,10 @@ class InfluxCanaryStorage(CanaryStorage):
             client_ip=hit.client_ip,
             timestamp=hit.timestamp,
         )
+
+    async def prune_old_hits(self, retention_days: int) -> int:
+        # Retention for Influx is configured at bucket level in production.
+        return 0
 
 
 def build_canary_storage(settings: Settings) -> CanaryStorage:

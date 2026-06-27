@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from fastapi import HTTPException
+
 from app.config import Settings
 from app.core.cache import osint_cache
 from app.models.osint import (
@@ -42,8 +44,8 @@ async def _enrich_ip(ip: str, settings: Settings) -> list[IPIntelResult]:
         try:
             data, was_cached = await _cached_fetch(cache_key, fetcher)
             results.append(IPIntelResult(ip=ip, source=source, cached=was_cached, data=data))
-        except Exception as exc:  # noqa: BLE001
-            results.append(IPIntelResult(ip=ip, source=source, error=str(exc)))
+        except Exception:  # noqa: BLE001
+            results.append(IPIntelResult(ip=ip, source=source, error="lookup failed"))
 
     return results
 
@@ -53,8 +55,8 @@ async def _enrich_domain(domain: str) -> list[DomainIntelResult]:
     try:
         data, was_cached = await _cached_fetch(cache_key, lambda: query_whois(domain))
         return [DomainIntelResult(domain=domain, source="whois", cached=was_cached, data=data)]
-    except Exception as exc:  # noqa: BLE001
-        return [DomainIntelResult(domain=domain, source="whois", error=str(exc))]
+    except Exception:  # noqa: BLE001
+        return [DomainIntelResult(domain=domain, source="whois", error="lookup failed")]
 
 
 async def _enrich_email(email: str) -> list[EmailIntelResult]:
@@ -74,9 +76,14 @@ async def _enrich_email(email: str) -> list[EmailIntelResult]:
 
 
 async def aggregate_osint(request: OSINTQueryRequest, settings: Settings) -> OSINTQueryResponse:
-    ips = list(dict.fromkeys(request.ips))
-    domains = list(dict.fromkeys(request.domains))
-    emails = list(dict.fromkeys(request.emails))
+    limit = settings.osint_max_entities_per_type
+    ips = list(dict.fromkeys(request.ips))[:limit]
+    domains = list(dict.fromkeys(request.domains))[:limit]
+    emails = list(dict.fromkeys(request.emails))[:limit]
+
+    total = len(ips) + len(domains) + len(emails)
+    if total > limit * 3:
+        raise HTTPException(status_code=400, detail="Too many entities")
 
     ip_tasks = [_enrich_ip(ip, settings) for ip in ips]
     domain_tasks = [_enrich_domain(d) for d in domains]

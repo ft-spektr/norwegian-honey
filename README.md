@@ -20,15 +20,16 @@ A lightweight, self-hosted investigative toolkit for analyzing phishing and scam
 └─────────────┘     └──────────────────────────────────────┘
 ```
 
-Production adds **Caddy** for automatic HTTPS in front of the API.
+Production adds **Caddy** for automatic HTTPS, per-IP rate limiting, and counter-attack hardening in front of the API.
 
 ## Quick start (production — cloud at spek-tr.no)
 
 ```bash
 cp make.env.example make.env    # set PROD_SSH for canary logs
+# Set INVESTIGATOR_API_KEY in .env (see .env.production.example)
 make health PRETTY=1
 make analyze-eml EML=suspicious.eml PRETTY=1
-make canary-token
+make canary-token               # generates + registers token on VPS
 make prod-canary-logs
 ```
 
@@ -152,11 +153,18 @@ fixtures/           # sample .eml for testing
 
 ## OpSec notes
 
-- Set `DEBUG=false` in production (disables `/docs`)
+Scammers who discover the canary may try to flood, probe, or abuse your server. Defenses in place:
+
+- **`INVESTIGATOR_API_KEY`** — `/analyze` and `/osint` require `X-API-Key` in production
+- **Token registry** — only pre-registered canary tokens are logged (`make canary-token`)
+- **Rate limits** — per-IP caps at Caddy (see `deploy/DEPLOY.md`)
+- **Body size limits** — 1–2 MiB max on uploads and JSON payloads
+- Set `DEBUG=false` in production (disables `/docs` and `/openapi.json`)
 - Run on an isolated VPS; use a dedicated subdomain for the canary
-- The pixel endpoint always returns the same PNG — never leaks stack traces
-- `Authorization` / `Cookie` headers are redacted before logging
+- The pixel endpoint always returns the same PNG — never leaks stack traces or errors
 - Only trust `X-Forwarded-For` when behind a known reverse proxy (`TRUSTED_PROXY_HEADERS=true`)
+
+Full hardening guide: `deploy/DEPLOY.md`
 
 ## License
 

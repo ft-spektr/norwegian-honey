@@ -133,11 +133,75 @@ bash deploy/deploy.sh
 
 ## OpSec checklist
 
-- [ ] `DEBUG=false` in `.env` (disables `/docs`)
+- [ ] `DEBUG=false` in `.env` (disables `/docs`, `/openapi.json`)
+- [ ] `INVESTIGATOR_API_KEY` set — `/analyze` and `/osint` reject unauthenticated requests
+- [ ] Canary tokens **registered** before embedding (`make canary-token` or `register_canary_token.py`)
 - [ ] Firewall allows only **22, 80, 443** (`setup-server.sh` does this)
-- [ ] Use a **dedicated subdomain** for the canary (e.g. `canary.…`)
-- [ ] Consider restricting `/analyze` and `/osint` to your IP in Caddy (optional)
+- [ ] Rate limiting enabled via custom Caddy image (see below)
 - [ ] Do not commit `.env` or `ngrok.local.yml`
+
+---
+
+## Counter-attack hardening
+
+After a scammer discovers the tracking pixel, they may flood endpoints, burn OSINT API quota, or probe for weaknesses. Layers in place:
+
+| Layer | What it does |
+|-------|----------------|
+| **Caddy rate limits** | Per-IP caps on all paths (see below) |
+| **API key** | `/analyze` and `/osint` require `X-API-Key` header |
+| **Token registry** | Only pre-registered canary tokens are logged — random floods are ignored |
+| **Body size limits** | 1–2 MiB max at app + Caddy |
+| **OSINT caps** | Max 10 entities per type per request |
+| **Hit retention** | SQLite hits pruned after 90 days (configurable) |
+| **No info leaks** | Canary always returns same PNG; OSINT errors are generic; `/health` has no version |
+| **Host validation** | `TrustedHostMiddleware` when `DOMAIN` is set |
+| **Blocked paths** | `/openapi.json`, `/docs`, `/redoc` return 404 at Caddy |
+
+### Generate API key
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Add to `.env` on the server as `INVESTIGATOR_API_KEY=...` and to your local `.env` / `make.env` for Makefile targets.
+
+### Canary workflow (production)
+
+```bash
+# From your machine — generates token, registers on VPS, prints embed HTML
+make canary-token
+
+# Or manually register an existing token on the server
+make prod-canary-register TOKEN=your-token-here
+```
+
+Unregistered tokens still get a valid PNG (no error leak) but **produce no log entry**.
+
+---
+
+## Rate limiting
+
+Production Caddy is built with `github.com/mholt/caddy-ratelimit` (`deploy/Dockerfile.caddy`).
+
+Per-client IP limits (per minute):
+
+| Zone | Path | Limit |
+|------|------|-------|
+| global | all | 120 req |
+| analyze | `/analyze/*` | 20 req |
+| osint | `/osint/*` | 30 req |
+| canary | `/images/*` | 60 req |
+
+Exceeded limits return **HTTP 429** with `Retry-After: 60`.
+
+To tune limits, edit `deploy/Caddyfile` and redeploy:
+
+```bash
+bash deploy/deploy.sh
+```
+
+First deploy after this change rebuilds the Caddy image (may take 1–2 minutes).
 
 ---
 
@@ -145,7 +209,11 @@ bash deploy/deploy.sh
 
 | Problem | Fix |
 |---------|-----|
-| Caddy won't get certificate | DNS not propagated; check `dig www736.your-server.de` |
+| Caddy won't get certificate | DNS not propagated; check `dig spek-tr.no` |
+| 401 Unauthorized | Set `INVESTIGATOR_API_KEY` in `.env` and pass `X-API-Key` header |
+| 503 Service unavailable | `INVESTIGATOR_API_KEY` missing on server — set in `.env` and redeploy |
+| 429 Too Many Requests | Rate limit hit — wait 60s or tune `deploy/Caddyfile` |
+| Canary hit not logged | Token not registered — run `make prod-canary-register TOKEN=...` |
 | 502 Bad Gateway | `docker compose logs api` — API not healthy |
 | Canary hits missing | Confirm `TRUSTED_PROXY_HEADERS=true` |
 | Port 8000 conflict | Production compose removes public 8000 binding |
