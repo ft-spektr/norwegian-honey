@@ -47,9 +47,10 @@ class Settings(BaseSettings):
 
     @property
     def allowed_hosts(self) -> list[str]:
-        if not self.domain:
-            return []
-        hosts = [self.domain.strip(), f"www.{self.domain.strip()}"]
+        # Include internal hosts so Docker healthchecks (127.0.0.1) still pass.
+        hosts = ["localhost", "127.0.0.1", "api"]
+        if self.domain:
+            hosts.extend([self.domain.strip(), f"www.{self.domain.strip()}"])
         return list(dict.fromkeys(h for h in hosts if h))
 
 

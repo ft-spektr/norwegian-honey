@@ -17,13 +17,24 @@ source .env
 set +a
 
 if [[ -z "${DOMAIN:-}" ]]; then
-  echo "Set DOMAIN in .env (e.g. www736.your-server.de)"
+  echo "Set DOMAIN in .env (e.g. spek-tr.no)"
+  exit 1
+fi
+
+if [[ -z "${INVESTIGATOR_API_KEY:-}" ]]; then
+  echo "Set INVESTIGATOR_API_KEY in .env (see .env.production.example)"
   exit 1
 fi
 
 echo "Deploying to https://${DOMAIN}"
 
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+
+if ! docker compose -f docker-compose.yml -f docker-compose.prod.yml ps api --status running -q | grep -q .; then
+  echo "API container failed to start. Recent logs:"
+  docker compose -f docker-compose.yml -f docker-compose.prod.yml logs api --tail 50
+  exit 1
+fi
 
 echo "Waiting for health..."
 for _ in $(seq 1 30); do
