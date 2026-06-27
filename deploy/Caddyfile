@@ -1,0 +1,18 @@
+# Caddy reverse proxy — automatic HTTPS via Let's Encrypt.
+# Set DOMAIN in .env before starting (DNS A record must point to this VPS).
+
+{$DOMAIN} {
+	encode gzip
+
+	reverse_proxy api:8000 {
+		# Preserve client IP for canary logging
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# OpSec: hide upstream server identity
+	header {
+		-Server
+	}
+}

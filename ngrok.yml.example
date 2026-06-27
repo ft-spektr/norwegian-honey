@@ -1,0 +1,23 @@
+version: "2"
+
+# Norwegian Honey — ngrok tunnel configuration
+#
+# Setup (once):
+#   cp ngrok.local.yml.example ngrok.local.yml
+#   # add your authtoken to ngrok.local.yml
+#
+# Start:
+#   make ngrok-tunnel
+#
+# Dashboard: http://127.0.0.1:4040
+
+region: auto
+web_addr: 127.0.0.1:4040
+log_level: info
+
+tunnels:
+  norwegian-honey:
+    proto: http
+    addr: 8000
+    domain: YOUR_DOMAIN_HERE
+    # schemes: [https]  # uncomment to disable http on the public URL

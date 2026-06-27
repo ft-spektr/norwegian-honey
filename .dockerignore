@@ -1,0 +1,13 @@
+# Git / local dev
+.git
+.venv
+__pycache__
+*.pyc
+.env
+ngrok.local.yml
+data/
+analysis.json
+*.eml
+
+# Docs / fixtures not needed in image
+fixtures/

@@ -1,0 +1,17 @@
+From: scammer@evil-phish.example
+Reply-To: collector@different-bad.example
+Return-Path: <bounce@evil-phish.example>
+Subject: Urgent wire transfer required
+Date: Mon, 1 Jan 2024 12:00:00 +0000
+Message-ID: <test@evil-phish.example>
+Authentication-Results: mx.example.com;
+ spf=fail (sender IP is 203.0.113.50) smtp.mailfrom=evil-phish.example;
+ dkim=fail header.d=evil-phish.example;
+ dmarc=fail header.from=evil-phish.example
+Received: from mail.badactor.example (mail.badactor.example [198.51.100.10])
+    by mx.example.com with ESMTPS id abc123;
+    Mon, 1 Jan 2024 11:59:00 +0000
+X-Originating-IP: [203.0.113.99]
+Content-Type: text/plain; charset=utf-8
+
+This is a sample phishing body for local testing.

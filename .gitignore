@@ -1,0 +1,9 @@
+data/
+data/**
+.venv/
+.env
+ngrok.local.yml
+ngrok.yml
+
+*.json
+/*.eml

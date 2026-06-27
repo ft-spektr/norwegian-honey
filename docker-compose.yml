@@ -1,0 +1,41 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      CANARY_STORAGE: sqlite
+      CANARY_SQLITE_PATH: /data/canary.db
+      TRUSTED_PROXY_HEADERS: "true"
+    volumes:
+      - canary_data:/data
+    restart: unless-stopped
+    # OpSec: place behind reverse proxy on the VPS; do not expose debug ports publicly
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Optional InfluxDB backend — enable with CANARY_STORAGE=influx in .env
+  influxdb:
+    image: influxdb:2.7
+    profiles: ["influx"]
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: changeme-use-strong-password
+      DOCKER_INFLUXDB_INIT_ORG: norwegian-honey
+      DOCKER_INFLUXDB_INIT_BUCKET: canary
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: changeme-generate-secure-token
+    volumes:
+      - influx_data:/var/lib/influxdb2
+    restart: unless-stopped
+
+volumes:
+  canary_data:
+  influx_data:
