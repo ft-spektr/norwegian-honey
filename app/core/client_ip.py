@@ -6,22 +6,26 @@ import ipaddress
 
 from fastapi import Request
 
-# RFC 1918 + Docker bridge ranges — never treat as the real client when spoofed in XFF.
 _PRIVATE_NETWORKS = (
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),
 )
 
 
-def _is_public_ip(value: str) -> bool:
+def _parse_ip(value: str) -> str | None:
     try:
-        addr = ipaddress.ip_address(value.strip())
+        return str(ipaddress.ip_address(value.strip()))
     except ValueError:
+        return None
+
+
+def _is_public_ip(value: str) -> bool:
+    parsed = _parse_ip(value)
+    if parsed is None:
         return False
+    addr = ipaddress.ip_address(parsed)
     if addr.is_loopback or addr.is_link_local or addr.is_reserved:
         return False
     return not any(addr in net for net in _PRIVATE_NETWORKS)
@@ -31,21 +35,27 @@ def get_client_ip(request: Request, trust_proxy_headers: bool = True) -> str:
     """
     Resolve the requester's IP.
 
-    OpSec: Only trust proxy headers when the app sits behind a known reverse
-    proxy (Caddy). Prefer X-Real-IP (set by our proxy, not sent by browsers).
+    In production the API is only reachable from Caddy, which sets X-Real-IP
+    from {remote_ip}. Trust that header when it contains a valid IP address.
     """
     if trust_proxy_headers:
         real_ip = request.headers.get("x-real-ip")
-        if real_ip and _is_public_ip(real_ip):
-            return real_ip.strip()
+        if real_ip:
+            parsed = _parse_ip(real_ip)
+            if parsed:
+                return parsed
 
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
-            # Use the last public IP — our edge proxy appends the real client.
-            for hop in reversed([h.strip() for h in forwarded.split(",") if h.strip()]):
-                if _is_public_ip(hop):
-                    return hop
+            hops = [h.strip() for h in forwarded.split(",") if h.strip()]
+            for hop in reversed(hops):
+                parsed = _parse_ip(hop)
+                if parsed and _is_public_ip(parsed):
+                    return parsed
 
-    if request.client and request.client.host and _is_public_ip(request.client.host):
-        return request.client.host
+    if request.client and request.client.host:
+        parsed = _parse_ip(request.client.host)
+        if parsed and _is_public_ip(parsed):
+            return parsed
+
     return "unknown"
