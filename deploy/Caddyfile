@@ -66,6 +66,9 @@
 	}
 
 	reverse_proxy api:8000 {
+		# Strip client-supplied values — browsers/extensions can send spoofed XFF.
+		header_up -X-Forwarded-For
+		header_up -X-Real-IP
 		header_up X-Forwarded-For {remote_host}
 		header_up X-Real-IP {remote_host}
 		header_up X-Forwarded-Proto {scheme}
