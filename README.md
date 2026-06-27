@@ -203,7 +203,7 @@ Scammers who discover the canary may try to flood, probe, or abuse your server. 
 - **Body size limits** — 1–2 MiB max on uploads and JSON payloads
 - **`DEBUG=false`** in production (disables `/docs` and `/openapi.json`)
 - Canary endpoints always return the same decoy — never leak errors or stack traces
-- Caddy sets `X-Real-IP` from `{remote_ip}` for accurate client logging
+- Caddy sets `X-Real-IP` from `{client_ip}` for accurate client logging
 
 Full hardening guide: `deploy/DEPLOY.md`
 

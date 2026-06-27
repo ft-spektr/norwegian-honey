@@ -15,8 +15,14 @@ _PRIVATE_NETWORKS = (
 
 
 def _parse_ip(value: str) -> str | None:
+    # Caddy/uvicorn may include :port for IPv4 in some edge cases
+    host = value.strip().split(",", 1)[0].strip()
+    if host.startswith("[") and "]" in host:
+        host = host[1 : host.index("]")]
+    elif host.count(":") == 1 and "." in host:
+        host = host.rsplit(":", 1)[0]
     try:
-        return str(ipaddress.ip_address(value.strip()))
+        return str(ipaddress.ip_address(host))
     except ValueError:
         return None
 
@@ -31,12 +37,36 @@ def _is_public_ip(value: str) -> bool:
     return not any(addr in net for net in _PRIVATE_NETWORKS)
 
 
+def _ip_from_forwarded(value: str) -> str | None:
+    hops = [h.strip() for h in value.split(",") if h.strip()]
+    if not hops:
+        return None
+
+    # Standard proxy chain: first public IP is the original client.
+    for hop in hops:
+        parsed = _parse_ip(hop)
+        if parsed and _is_public_ip(parsed):
+            return parsed
+
+    # Single hop from our edge Caddy (replaces client XFF) — trust the only value.
+    if len(hops) == 1:
+        return _parse_ip(hops[0])
+
+    # Multi-hop with only private IPs left — use rightmost (closest to edge).
+    for hop in reversed(hops):
+        parsed = _parse_ip(hop)
+        if parsed:
+            return parsed
+
+    return None
+
+
 def get_client_ip(request: Request, trust_proxy_headers: bool = True) -> str:
     """
     Resolve the requester's IP.
 
-    In production the API is only reachable from Caddy, which sets X-Real-IP
-    from {remote_ip}. Trust that header when it contains a valid IP address.
+    Production: Caddy is the only public entrypoint and sets X-Real-IP /
+    X-Forwarded-For from {client_ip} (the TCP peer connecting to :443).
     """
     if trust_proxy_headers:
         real_ip = request.headers.get("x-real-ip")
@@ -47,11 +77,9 @@ def get_client_ip(request: Request, trust_proxy_headers: bool = True) -> str:
 
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
-            hops = [h.strip() for h in forwarded.split(",") if h.strip()]
-            for hop in reversed(hops):
-                parsed = _parse_ip(hop)
-                if parsed and _is_public_ip(parsed):
-                    return parsed
+            resolved = _ip_from_forwarded(forwarded)
+            if resolved:
+                return resolved
 
     if request.client and request.client.host:
         parsed = _parse_ip(request.client.host)

@@ -233,7 +233,7 @@ make prod-canary-flush
 | **Hit retention** | Auto-prune after 90 days (`CANARY_HIT_RETENTION_DAYS`) |
 | **No info leaks** | Canary always returns same decoy; generic OSINT errors |
 | **Blocked paths** | `/openapi.json`, `/docs`, `/redoc` → 404 at Caddy |
-| **Client IP** | Caddy sets `X-Real-IP` from `{remote_ip}`; spoofed headers stripped |
+| **Client IP** | Caddy sets `X-Real-IP` from `{client_ip}` (TCP peer on :443) |
 
 ---
 
@@ -267,7 +267,7 @@ Tune in `deploy/Caddyfile`, then `bash deploy/deploy.sh`.
 | 429 Too Many Requests | Rate limit — wait 60s or tune `deploy/Caddyfile` |
 | 502 Bad Gateway | `docker compose logs api` — API not healthy |
 | Canary hit not logged | Token not registered — `make prod-canary-register TOKEN=...` |
-| Canary logs `172.18.x.x` or `unknown` | Redeploy — Caddy must use `{remote_ip}` and strip client `X-Forwarded-For` |
+| Canary logs `172.18.x.x` or `unknown` | Redeploy — Caddy must use `{client_ip}` in `header_up` directives |
 | Chrome hits local, curl hits prod | Use `https://canary.example.com/...` in browser; stop local `docker compose` |
 | `deploy.sh` fails SSH from make | `ssh-add ~/.ssh/norwegian-honey` |
 | Port 8000 conflict locally | Production compose does not publish 8000; stop local stack |

@@ -1,7 +1,7 @@
 # Caddy reverse proxy — automatic HTTPS via Let's Encrypt.
 # Set DOMAIN in .env before starting (DNS A record must point to this VPS).
 #
-# Rate limits are per client IP ({remote_ip}). Requires custom Caddy image
+# Rate limits are per client IP ({client_ip}). Requires custom Caddy image
 # (deploy/Dockerfile.caddy) with github.com/mholt/caddy-ratelimit.
 
 {$DOMAIN} {
@@ -21,7 +21,7 @@
 	rate_limit {
 		# Global cap — catch-all abuse
 		zone global {
-			key {remote_ip}
+			key {client_ip}
 			events 120
 			window 1m
 		}
@@ -31,7 +31,7 @@
 			match {
 				path /analyze/*
 			}
-			key {remote_ip}
+			key {client_ip}
 			events 20
 			window 1m
 		}
@@ -41,7 +41,7 @@
 			match {
 				path /osint/*
 			}
-			key {remote_ip}
+			key {client_ip}
 			events 30
 			window 1m
 		}
@@ -51,7 +51,7 @@
 			match {
 				path /images/* /portfolio/*
 			}
-			key {remote_ip}
+			key {client_ip}
 			events 60
 			window 1m
 		}
@@ -66,11 +66,9 @@
 	}
 
 	reverse_proxy api:8000 {
-		# Strip client-supplied values — browsers/extensions can send spoofed XFF.
-		header_up -X-Forwarded-For
-		header_up -X-Real-IP
-		header_up X-Forwarded-For {remote_ip}
-		header_up X-Real-IP {remote_ip}
+		# {client_ip} = TCP peer on :443 (the browser). Set (not append) headers.
+		header_up X-Forwarded-For {client_ip}
+		header_up X-Real-IP {client_ip}
 		header_up X-Forwarded-Proto {scheme}
 	}
 
