@@ -1,7 +1,7 @@
 # Norwegian Honey — Makefile
 # Usage: make help | make help-local | make help-ngrok
 #
-# Default targets call PRODUCTION (spek-tr.no).
+# Default targets call PRODUCTION (set DOMAIN in make.env).
 # Local dev and ngrok targets are prefixed local-* / ngrok-*.
 
 .DEFAULT_GOAL := help
@@ -10,7 +10,7 @@
 -include make.env
 -include .env
 
-DOMAIN         ?= spek-tr.no
+DOMAIN         ?= canary.example.com
 PROD_URL       ?= https://$(DOMAIN)
 LOCAL_URL      ?= http://127.0.0.1:8000
 API_URL        ?= $(PROD_URL)
@@ -58,7 +58,9 @@ else
   FORMAT =
 endif
 
-# BatchMode=yes — fail fast instead of prompting for password
+KEEP_TOKENS    ?=
+CANARY_FLUSH_FLAGS = $(if $(KEEP_TOKENS),--keep-tokens,)
+
 # Run `ssh-add ~/.ssh/norwegian-honey` once per session if your key has a passphrase
 SSH_CMD = ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
 	-i $(PROD_SSH_KEY) -p $(PROD_SSH_PORT) $(PROD_SSH)
@@ -66,14 +68,15 @@ SSH_CMD = ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
 .PHONY: help help-local help-ngrok install \
         health analyze-headers analyze-headers-sample analyze-eml \
         osint-query osint-query-sample osint-from-analysis osint-from-sample \
-        canary-token canary-hit canary-demo canary-logs \
+        canary-token canary-hit canary-demo canary-logs canary-flush \
         local-dev local-docker-up local-docker-down local-docker-logs \
         local-health local-analyze-headers local-analyze-headers-sample local-analyze-eml \
         local-osint-query local-osint-query-sample local-osint-from-analysis local-osint-from-sample \
         local-canary-token local-canary-hit local-canary-demo \
         local-canary-logs local-canary-logs-local local-canary-logs-docker \
+        local-canary-flush local-canary-flush-local local-canary-flush-docker \
         local-cli-eml local-cli-headers local-docs \
-        prod-canary-logs prod-deploy prod-up prod-down prod-logs \
+        prod-canary-logs prod-canary-flush prod-deploy prod-up prod-down prod-logs \
         ngrok-install ngrok-setup ngrok-check ngrok-tunnel ngrok-tunnel-ephemeral ngrok-url \
         ngrok-health ngrok-canary-token
 
@@ -230,6 +233,12 @@ rows=db.execute('SELECT id, trap, token, client_ip, user_agent, timestamp FROM c
 print('id|trap|token|client_ip|user_agent|timestamp'); \
 [print('|'.join(str(c) if c is not None else '' for c in r)) for r in rows] or print('(no hits)')\""
 
+canary-flush: prod-canary-flush ## [prod] Alias — flush canary DB on server
+
+prod-canary-flush: ## [prod] Flush canary SQLite on VPS (KEEP_TOKENS=1 to keep registered tokens)
+	$(SSH_CMD) "cd $(PROD_REMOTE_DIR) && docker compose exec -T $(DOCKER_SERVICE) \
+		python scripts/flush_canary_db.py --db-path $(DOCKER_CANARY_DB) $(CANARY_FLUSH_FLAGS)"
+
 # =============================================================================
 # LOCAL DEV — run server on localhost
 # =============================================================================
@@ -318,6 +327,20 @@ db=sqlite3.connect('$(DOCKER_CANARY_DB)'); \
 rows=db.execute('SELECT id, trap, token, client_ip, user_agent, timestamp FROM canary_hits ORDER BY id DESC LIMIT 10').fetchall(); \
 print('id|trap|token|client_ip|user_agent|timestamp'); \
 [print('|'.join(str(c) if c is not None else '' for c in r)) for r in rows] or print('(no hits)')"
+
+local-canary-flush: ## Flush local canary DB — docker if running, else ./data/canary.db
+	@if docker compose ps --status running -q $(DOCKER_SERVICE) 2>/dev/null | grep -q .; then \
+		$(MAKE) local-canary-flush-docker; \
+	else \
+		$(MAKE) local-canary-flush-local; \
+	fi
+
+local-canary-flush-local: ## Flush ./data/canary.db (KEEP_TOKENS=1 to keep registered tokens)
+	$(PYTHON) scripts/flush_canary_db.py --db-path $(CANARY_DB) $(CANARY_FLUSH_FLAGS)
+
+local-canary-flush-docker: ## Flush canary DB in local Docker volume
+	docker compose exec -T $(DOCKER_SERVICE) \
+		python scripts/flush_canary_db.py --db-path $(DOCKER_CANARY_DB) $(CANARY_FLUSH_FLAGS)
 
 local-cli-eml: ## Analyze .eml offline (no server)
 	$(PYTHON) -m app.cli.header_eval --eml "$(EML)" --pretty

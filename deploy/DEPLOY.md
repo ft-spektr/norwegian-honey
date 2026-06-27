@@ -1,64 +1,54 @@
-# Deploy Norwegian Honey on Hetzner
+# Deploy Norwegian Honey
 
-## Overview
+Production guide for a Linux VPS with SSH (Hetzner, DigitalOcean, Vultr, etc.).
+
+## Architecture
 
 ```
-Internet → Caddy (HTTPS :443) → api:8000 (Docker internal)
-                                      ↓
-                               SQLite /data/canary.db
+Internet → Caddy (:443, TLS, rate limits) → api:8000 (Docker internal only)
+                                                    ↓
+                                         SQLite  /data/canary.db
 ```
 
-- **Caddy** terminates TLS (Let's Encrypt) and reverse-proxies to FastAPI.
-- Port **8000 is not exposed** publicly in production.
-- **ngrok is not used** on the VPS — use a real domain instead.
+| Component | Role |
+|-----------|------|
+| **Caddy** | Let's Encrypt TLS, reverse proxy, rate limits, strips spoofed `X-Forwarded-For` |
+| **FastAPI** | `/analyze`, `/osint` (API-key protected), `/images`, `/portfolio` (canary traps) |
+| **SQLite** | Canary hits + registered tokens (Docker volume `canary_data`) |
+
+Port **8000 is not published** publicly. Only Caddy exposes **80** and **443**.
 
 ---
 
-## 1. Create the Hetzner server
+## Prerequisites
 
-1. Hetzner Cloud → **Add Server**
-2. Image: **Ubuntu 24.04**
-3. Type: **CX22** or similar (2 vCPU, 4 GB RAM recommended)
-4. Add your SSH key
-5. Note the **public IPv4 address**
+- VPS with **SSH** (SFTP-only hosting will not work)
+- A domain or subdomain with an **A record** → VPS public IP
+- SSH key on the server (`~/.ssh/norwegian-honey` recommended)
 
----
-
-## 2. DNS
-
-Create an **A record** (or use the hostname Hetzner assigned) pointing to the server IP:
-
-```
-www736.your-server.de  →  <HETZNER_IP>
-```
-
-Hetzner `your-server.de` hostnames are often pre-linked to your server — verify with:
+Example: `canary.example.com` → `YOUR_VPS_IP`
 
 ```bash
-dig +short www736.your-server.de
+dig +short canary.example.com
 ```
 
 ---
 
-## 3. Bootstrap the server (once)
+## 1. Bootstrap the server (once)
 
 ```bash
-ssh root@<HETZNER_IP>
+ssh -i ~/.ssh/norwegian-honey root@YOUR_VPS_IP
 
-# Option A: clone from git
 apt-get update && apt-get install -y git
-git clone <your-repo-url> /opt/norwegian-honey
+git clone https://github.com/YOUR_ORG/norwegian-honey.git /opt/norwegian-honey
 cd /opt/norwegian-honey
 
-# Option B: copy from your machine
-# rsync -avz --exclude .venv --exclude data ./ user@<HETZNER_IP>:/opt/norwegian-honey/
-
-sudo bash deploy/setup-server.sh
+bash deploy/setup-server.sh    # Docker, UFW (22/80/443), fail2ban
 ```
 
 ---
 
-## 4. Configure environment
+## 2. Configure `.env` on the VPS
 
 ```bash
 cd /opt/norwegian-honey
@@ -66,68 +56,39 @@ cp .env.production.example .env
 nano .env
 ```
 
-Set at minimum:
+**Required:**
 
 ```env
-DOMAIN=www736.your-server.de
-PUBLIC_BASE_URL=https://www736.your-server.de
+DOMAIN=canary.example.com
+INVESTIGATOR_API_KEY=<generate-below>
 DEBUG=false
 TRUSTED_PROXY_HEADERS=true
-ABUSEIPDB_API_KEY=...   # optional
-IPINFO_API_KEY=...      # optional
 ```
+
+Generate the API key:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Copy the same key to your **local** `.env` so Makefile targets (`make analyze-eml`, etc.) can send `X-API-Key`.
+
+**Canary (defaults are fine):**
+
+```env
+CANARY_STORAGE=sqlite
+CANARY_SQLITE_PATH=/data/canary.db
+CANARY_REQUIRE_REGISTERED_TOKEN=true
+CANARY_HIT_RETENTION_DAYS=90
+```
+
+**Optional OSINT keys:** `ABUSEIPDB_API_KEY`, `IPINFO_API_KEY`
 
 ---
 
-## 5. Deploy
+## 3. Deploy / update
 
-```bash
-bash deploy/deploy.sh
-```
-
-Or from your dev machine (if compose context is synced):
-
-```bash
-make prod-up
-```
-
-Verify:
-
-```bash
-curl -s https://www736.your-server.de/health
-```
-
----
-
-## 6. Generate canary tokens (on server)
-
-```bash
-# Hidden pixel (email img tag)
-docker compose exec api python scripts/generate_canary_token.py \
-  --base-url "https://spek-tr.no" --trap pixel --count 1
-
-# Portfolio link (email hyperlink)
-docker compose exec api python scripts/generate_canary_token.py \
-  --base-url "https://spek-tr.no" --trap portfolio --count 1 \
-  --register-db /data/canary.db
-```
-
-View hits:
-
-```bash
-make prod-canary-logs
-# or on server:
-docker compose exec -T api python -c "
-import sqlite3
-db=sqlite3.connect('/data/canary.db')
-for r in db.execute('SELECT id, trap, token, client_ip, user_agent, timestamp FROM canary_hits ORDER BY id DESC LIMIT 10'):
-    print(r)
-"
-```
-
----
-
-## 7. Updates
+On the **VPS**:
 
 ```bash
 cd /opt/norwegian-honey
@@ -135,60 +96,150 @@ git pull
 bash deploy/deploy.sh
 ```
 
+`deploy.sh` checks `DOMAIN` and `INVESTIGATOR_API_KEY`, builds images, starts Caddy + API, and prints health status.
+
+Verify:
+
+```bash
+curl -s https://canary.example.com/health
+# {"status":"ok"}
+```
+
+---
+
+## 4. Configure your laptop (`make.env`)
+
+For remote canary ops from your dev machine:
+
+```bash
+cp make.env.example make.env
+nano make.env
+```
+
+```env
+PROD_SSH=root@YOUR_VPS_IP
+PROD_SSH_KEY=$(HOME)/.ssh/norwegian-honey
+PROD_REMOTE_DIR=/opt/norwegian-honey
+```
+
+Load your SSH key once per session:
+
+```bash
+ssh-add ~/.ssh/norwegian-honey
+```
+
+---
+
+## 5. Canary operations
+
+### Trap types
+
+| Trap | URL | Embed |
+|------|-----|-------|
+| **Pixel** | `https://DOMAIN/images/{token}.png` | `<img src="..." width="1" height="1" style="display:none" />` |
+| **Portfolio** | `https://DOMAIN/portfolio/{token}` | `<a href="...">View portfolio</a>` |
+
+Tokens must be **registered** before hits are logged. Unregistered requests still get the decoy (pixel or page) but produce **no log entry**.
+
+### From your laptop (recommended)
+
+```bash
+make canary-token                        # pixel — generate + register on VPS
+make canary-token TRAP=portfolio         # portfolio link
+make canary-token TRAP=both              # both embed URLs
+
+make prod-canary-register TOKEN=abc123   # register existing token
+make canary-hit TOKEN=abc123 TRAP=portfolio
+make prod-canary-logs                    # view last 10 hits
+make prod-canary-flush                   # delete hits + tokens
+make prod-canary-flush KEEP_TOKENS=1     # delete hits only
+```
+
+### On the VPS directly
+
+```bash
+cd /opt/norwegian-honey
+
+# Generate + register
+docker compose exec -T api python scripts/generate_canary_token.py \
+  --base-url "https://canary.example.com" --trap portfolio \
+  --register-db /data/canary.db
+
+# Register existing token
+docker compose exec -T api python scripts/register_canary_token.py \
+  'YOUR_TOKEN' --db-path /data/canary.db
+
+# View hits
+docker compose exec -T api python -c "
+import sqlite3
+db = sqlite3.connect('/data/canary.db')
+for r in db.execute(
+    'SELECT id, trap, token, client_ip, user_agent, timestamp '
+    'FROM canary_hits ORDER BY id DESC LIMIT 10'
+):
+    print(r)
+"
+
+# Flush
+docker compose exec -T api python scripts/flush_canary_db.py --db-path /data/canary.db
+docker compose exec -T api python scripts/flush_canary_db.py --db-path /data/canary.db --keep-tokens
+```
+
+---
+
+## 6. Day-to-day commands
+
+### On the VPS
+
+```bash
+cd /opt/norwegian-honey
+docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f api
+docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f caddy
+docker compose -f docker-compose.yml -f docker-compose.prod.yml down    # stop
+```
+
+### From your laptop
+
+```bash
+make health PRETTY=1
+make analyze-eml EML=suspicious.eml PRETTY=1
+make prod-canary-logs
+make prod-canary-flush
+```
+
 ---
 
 ## OpSec checklist
 
-- [ ] `DEBUG=false` in `.env` (disables `/docs`, `/openapi.json`)
-- [ ] `INVESTIGATOR_API_KEY` set — `/analyze` and `/osint` reject unauthenticated requests
-- [ ] Canary tokens **registered** before embedding (`make canary-token` or `register_canary_token.py`)
-- [ ] Firewall allows only **22, 80, 443** (`setup-server.sh` does this)
-- [ ] Rate limiting enabled via custom Caddy image (see below)
-- [ ] Do not commit `.env` or `ngrok.local.yml`
+- [ ] `DEBUG=false` (disables `/docs`, `/openapi.json`)
+- [ ] `INVESTIGATOR_API_KEY` set on VPS **and** local `.env`
+- [ ] Canary tokens registered before embedding (`make canary-token`)
+- [ ] UFW allows only **22, 80, 443** (`setup-server.sh`)
+- [ ] Custom Caddy image with rate limiting (`deploy/Dockerfile.caddy`)
+- [ ] `.env`, `make.env`, `ngrok.local.yml` not committed
 
 ---
 
 ## Counter-attack hardening
 
-After a scammer discovers the tracking pixel, they may flood endpoints, burn OSINT API quota, or probe for weaknesses. Layers in place:
-
 | Layer | What it does |
 |-------|----------------|
-| **Caddy rate limits** | Per-IP caps on all paths (see below) |
-| **API key** | `/analyze` and `/osint` require `X-API-Key` header |
-| **Token registry** | Only pre-registered canary tokens are logged — random floods are ignored |
-| **Body size limits** | 1–2 MiB max at app + Caddy |
+| **Caddy rate limits** | Per-IP caps (see table below) |
+| **API key** | `/analyze` and `/osint` require `X-API-Key` |
+| **Token registry** | Unregistered canary tokens are ignored (no DB flood) |
+| **Body size limits** | 1–2 MiB at app + Caddy |
 | **OSINT caps** | Max 10 entities per type per request |
-| **Hit retention** | SQLite hits pruned after 90 days (configurable) |
-| **No info leaks** | Canary always returns same PNG; OSINT errors are generic; `/health` has no version |
-| **Host validation** | `TrustedHostMiddleware` when `DOMAIN` is set |
-| **Blocked paths** | `/openapi.json`, `/docs`, `/redoc` return 404 at Caddy |
-
-### Generate API key
-
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-```
-
-Add to `.env` on the server as `INVESTIGATOR_API_KEY=...` and to your local `.env` / `make.env` for Makefile targets.
-
-### Canary workflow (production)
-
-```bash
-# From your machine — generates token, registers on VPS, prints embed HTML
-make canary-token
-
-# Or manually register an existing token on the server
-make prod-canary-register TOKEN=your-token-here
-```
-
-Unregistered tokens still get a valid PNG (no error leak) but **produce no log entry**.
+| **Hit retention** | Auto-prune after 90 days (`CANARY_HIT_RETENTION_DAYS`) |
+| **No info leaks** | Canary always returns same decoy; generic OSINT errors |
+| **Blocked paths** | `/openapi.json`, `/docs`, `/redoc` → 404 at Caddy |
+| **Client IP** | Caddy sets `X-Real-IP` from `{remote_ip}`; spoofed headers stripped |
 
 ---
 
 ## Rate limiting
 
-Production Caddy is built with `github.com/mholt/caddy-ratelimit` (`deploy/Dockerfile.caddy`).
+Caddy is built with `github.com/mholt/caddy-ratelimit` (`deploy/Dockerfile.caddy`).
 
 Per-client IP limits (per minute):
 
@@ -199,15 +250,9 @@ Per-client IP limits (per minute):
 | osint | `/osint/*` | 30 req |
 | canary | `/images/*`, `/portfolio/*` | 60 req |
 
-Exceeded limits return **HTTP 429** with `Retry-After: 60`.
+Exceeded → **HTTP 429** with `Retry-After: 60`.
 
-To tune limits, edit `deploy/Caddyfile` and redeploy:
-
-```bash
-bash deploy/deploy.sh
-```
-
-First deploy after this change rebuilds the Caddy image (may take 1–2 minutes).
+Tune in `deploy/Caddyfile`, then `bash deploy/deploy.sh`.
 
 ---
 
@@ -215,22 +260,43 @@ First deploy after this change rebuilds the Caddy image (may take 1–2 minutes)
 
 | Problem | Fix |
 |---------|-----|
-| Caddy won't get certificate | DNS not propagated; check `dig spek-tr.no` |
-| 401 Unauthorized | Set `INVESTIGATOR_API_KEY` in `.env` and pass `X-API-Key` header |
-| 503 Service unavailable | `INVESTIGATOR_API_KEY` missing on server — set in `.env` and redeploy |
-| 429 Too Many Requests | Rate limit hit — wait 60s or tune `deploy/Caddyfile` |
-| Canary hit not logged | Token not registered — run `make prod-canary-register TOKEN=...` |
+| Caddy won't get certificate | DNS not propagated — `dig +short canary.example.com` must show VPS IP |
+| API container won't start | `docker compose logs api` — often missing `INVESTIGATOR_API_KEY` |
+| 401 Unauthorized | Set `INVESTIGATOR_API_KEY` in `.env`; pass `X-API-Key` header |
+| 503 Service unavailable | `INVESTIGATOR_API_KEY` missing on server — set and redeploy |
+| 429 Too Many Requests | Rate limit — wait 60s or tune `deploy/Caddyfile` |
 | 502 Bad Gateway | `docker compose logs api` — API not healthy |
-| Canary hits missing | Confirm `TRUSTED_PROXY_HEADERS=true` |
-| Port 8000 conflict | Production compose removes public 8000 binding |
+| Canary hit not logged | Token not registered — `make prod-canary-register TOKEN=...` |
+| Canary logs `172.18.x.x` or `unknown` | Redeploy — Caddy must use `{remote_ip}` and strip client `X-Forwarded-For` |
+| Chrome hits local, curl hits prod | Use `https://canary.example.com/...` in browser; stop local `docker compose` |
+| `deploy.sh` fails SSH from make | `ssh-add ~/.ssh/norwegian-honey` |
+| Port 8000 conflict locally | Production compose does not publish 8000; stop local stack |
+
+### Useful diagnostics
+
+```bash
+# Container IPs (Docker bridge — not client IPs)
+docker network inspect norwegian-honey_default
+
+# Caddy config test (on VPS, inside caddy container)
+docker compose exec caddy caddy validate --config /etc/caddy/Caddyfile
+
+# API health inside Docker network
+docker compose exec api python -c \
+  "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health').read())"
+```
 
 ---
 
 ## Local vs production
 
-| | Local dev | Hetzner VPS |
-|--|-----------|-------------|
-| Start | `make dev` | `bash deploy/deploy.sh` |
-| HTTPS | ngrok | Caddy + Let's Encrypt |
-| Canary URL | ngrok domain | `https://DOMAIN` |
-| DB | `./data/canary.db` | Docker volume `canary_data` |
+| | Local dev | Production VPS |
+|--|-----------|----------------|
+| Start | `make local-dev` or `make local-docker-up` | `bash deploy/deploy.sh` |
+| HTTPS | ngrok (optional) | Caddy + Let's Encrypt |
+| Public URL | `http://127.0.0.1:8000` or ngrok | `https://DOMAIN` |
+| Canary ops | `local-canary-*` | `prod-canary-*` / `make canary-*` |
+| DB | `./data/canary.db` or Docker volume | `/data/canary.db` in `canary_data` volume |
+| API auth | Optional (`DEBUG=true`) | `INVESTIGATOR_API_KEY` required |
+
+**Important:** Test canary traps against `https://DOMAIN`, not `localhost` or ngrok, if you want hits in the production database with real client IPs.

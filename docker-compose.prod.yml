@@ -24,7 +24,7 @@ services:
       - "443:443"
       - "443:443/udp"
     environment:
-      DOMAIN: ${DOMAIN:?Set DOMAIN in .env e.g. www736.your-server.de}
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env e.g. canary.example.com}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

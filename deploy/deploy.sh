@@ -17,7 +17,7 @@ source .env
 set +a
 
 if [[ -z "${DOMAIN:-}" ]]; then
-  echo "Set DOMAIN in .env (e.g. spek-tr.no)"
+  echo "Set DOMAIN in .env (e.g. canary.example.com)"
   exit 1
 fi
 
