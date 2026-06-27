@@ -36,6 +36,8 @@ EML            ?= fixtures/sample.eml
 CANARY_DB      ?= ./data/canary.db
 TOKEN          ?=
 TRAP           ?= pixel
+# DB trap column uses images|portfolio; Make targets use pixel|portfolio
+CANARY_DB_TRAP = $(if $(filter portfolio,$(TRAP)),portfolio,images)
 HOST           ?= 127.0.0.1
 LOCAL_PORT     ?= 8000
 DOCKER_SERVICE ?= api
@@ -259,10 +261,11 @@ prod-canary-flush: ## [prod] Flush canary SQLite on VPS (KEEP_TOKENS=1 to keep r
 		python scripts/flush_canary_db.py --db-path $(DOCKER_CANARY_DB) $(CANARY_FLUSH_FLAGS)"
 
 prod-canary-export: ## [prod] Export canary investigation JSON (TOKEN= TRAP= OUT=investigation.json)
-	@test -n "$(OUT)" || (echo "Usage: make prod-canary-export OUT=investigation.json [TOKEN=] [TRAP=portfolio]"; exit 1)
+	@test -n "$(OUT)" || (echo "Usage: make prod-canary-export OUT=investigation.json [TOKEN=] [TRAP=portfolio|pixel]"; exit 1)
+	@mkdir -p "$(dir $(OUT))"
 	$(SSH_CMD) "cd $(PROD_REMOTE_DIR) && docker compose exec -T $(DOCKER_SERVICE) \
 		python scripts/export_canary_investigation.py --db-path $(DOCKER_CANARY_DB) \
-		$(if $(TOKEN),--token '$(TOKEN)',) $(if $(TRAP),--trap $(TRAP),) --run-osint" > "$(OUT)"
+		$(if $(TOKEN),--token '$(TOKEN)',) $(if $(filter command line,$(origin TRAP)),--trap $(CANARY_DB_TRAP),) --run-osint" > "$(OUT)"
 	@echo "Wrote $(OUT)"
 
 # =============================================================================
@@ -318,9 +321,10 @@ local-cli-report: ## CLI threat report (ANALYSIS= OUT=report.json, no server)
 		$(if $(OUT),-o "$(OUT)",)
 
 local-canary-export: ## Export canary investigation from local DB (TOKEN= TRAP= OUT=)
-	@test -n "$(OUT)" || (echo "Usage: make local-canary-export OUT=investigation.json [TOKEN=] [TRAP=]"; exit 1)
+	@test -n "$(OUT)" || (echo "Usage: make local-canary-export OUT=investigation.json [TOKEN=] [TRAP=portfolio|pixel]"; exit 1)
+	@mkdir -p "$(dir $(OUT))"
 	$(PYTHON) scripts/export_canary_investigation.py --db-path $(CANARY_DB) \
-		$(if $(TOKEN),--token "$(TOKEN)",) $(if $(TRAP),--trap $(TRAP),) \
+		$(if $(TOKEN),--token "$(TOKEN)",) $(if $(filter command line,$(origin TRAP)),--trap $(CANARY_DB_TRAP),) \
 		$(if $(OSINT),--osint "$(OSINT)",--run-osint) \
 		$(if $(ANALYSIS),--analysis "$(ANALYSIS)",) \
 		$(if $(REPORT),--threat-report "$(REPORT)",) \

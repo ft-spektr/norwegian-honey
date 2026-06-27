@@ -76,8 +76,14 @@ def _load_hits(db_path: Path, token: str | None, trap: str | None, limit: int) -
     return hits
 
 
+def _normalize_trap(trap: str | None) -> str | None:
+    if trap == "pixel":
+        return "images"
+    return trap
+
+
 async def _run(args: argparse.Namespace) -> str:
-    hits = _load_hits(Path(args.db_path), args.token, args.trap, args.limit)
+    hits = _load_hits(Path(args.db_path), args.token, _normalize_trap(args.trap), args.limit)
     osint: OSINTQueryResponse | None = None
     analysis: HeaderAnalysisResponse | None = None
     threat_report: ThreatScoreReport | None = None
@@ -110,7 +116,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Export canary hits + OSINT investigation JSON.")
     parser.add_argument("--db-path", default="./data/canary.db", help="Canary SQLite path")
     parser.add_argument("--token", help="Filter by canary token")
-    parser.add_argument("--trap", choices=("images", "portfolio"), help="Filter by trap type")
+    parser.add_argument(
+        "--trap",
+        choices=("images", "portfolio", "pixel"),
+        help="Filter by trap type (pixel = images)",
+    )
     parser.add_argument("--limit", type=int, default=500, help="Max hits to export")
     parser.add_argument("--run-osint", action="store_true", help="Run OSINT on unique hit IPs")
     parser.add_argument("--osint", type=Path, help="Use existing OSINT JSON instead of live lookups")
