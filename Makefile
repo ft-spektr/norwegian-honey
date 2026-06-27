@@ -1,186 +1,277 @@
-# Norwegian Honey — local dev & API testing shortcuts
-# Usage: make help
+# Norwegian Honey — Makefile
+# Usage: make help | make help-local | make help-ngrok
+#
+# Default targets call PRODUCTION (spek-tr.no).
+# Local dev and ngrok targets are prefixed local-* / ngrok-*.
 
 .DEFAULT_GOAL := help
 
-BASE_URL   ?= http://127.0.0.1:8000
-VENV       ?= .venv
-PYTHON     ?= $(VENV)/bin/python
-UVICORN    ?= $(VENV)/bin/uvicorn
-EML        ?= fixtures/sample.eml
-CANARY_DB  ?= ./data/canary.db
-TOKEN      ?=
-HOST       ?= 127.0.0.1
-PORT       ?= $(NGROK_PORT)
-NGROK      ?= $(shell command -v ngrok 2>/dev/null || echo $(HOME)/.local/bin/ngrok)
-NGROK_API      ?= http://127.0.0.1:4040
+# --- Client config (production URL, SSH for remote logs) ---
+-include make.env
+
+DOMAIN         ?= spek-tr.no
+PROD_URL       ?= https://$(DOMAIN)
+LOCAL_URL      ?= http://127.0.0.1:8000
+API_URL        ?= $(PROD_URL)
+
+PROD_SSH       ?= root@your-vps-ip
+PROD_SSH_KEY   ?= $(HOME)/.ssh/norwegian-honey
+PROD_SSH_PORT  ?= 22
+PROD_REMOTE_DIR ?= /opt/norwegian-honey
+
+# --- Tooling ---
+VENV           ?= .venv
+PYTHON         ?= $(VENV)/bin/python
+UVICORN        ?= $(VENV)/bin/uvicorn
+EML            ?= fixtures/sample.eml
+CANARY_DB      ?= ./data/canary.db
+TOKEN          ?=
+HOST           ?= 127.0.0.1
+LOCAL_PORT     ?= 8000
+DOCKER_SERVICE ?= api
+DOCKER_CANARY_DB ?= /data/canary.db
+
+# --- ngrok (local dev only) ---
+NGROK              ?= $(shell command -v ngrok 2>/dev/null || echo $(HOME)/.local/bin/ngrok)
+NGROK_API          ?= http://127.0.0.1:4040
 NGROK_CONFIG       ?= ngrok.yml
 NGROK_LOCAL_CONFIG ?= ngrok.local.yml
 NGROK_GLOBAL_CONFIG ?= $(HOME)/.config/ngrok/ngrok.yml
 NGROK_TUNNEL       ?= norwegian-honey
-# Read domain/port from ngrok.yml (single source of truth)
 NGROK_DOMAIN := $(shell grep -E '^\s+domain:' $(NGROK_CONFIG) 2>/dev/null | head -1 | sed 's/.*domain:[[:space:]]*//')
 NGROK_PORT   := $(shell grep -E '^\s+addr:' $(NGROK_CONFIG) 2>/dev/null | head -1 | sed 's/.*addr:[[:space:]]*//')
-PUBLIC_URL     ?= https://$(NGROK_DOMAIN)
-CANARY_BASE_URL ?= $(PUBLIC_URL)
-DOCKER_SERVICE   ?= api
-DOCKER_CANARY_DB ?= /data/canary.db
+NGROK_URL        ?= https://$(NGROK_DOMAIN)
 
-# Pipe JSON through json.tool when set: make health PRETTY=1
 ifeq ($(PRETTY),1)
   FORMAT = | $(PYTHON) -m json.tool
 else
   FORMAT =
 endif
 
-.PHONY: help install dev docker-up docker-down docker-logs prod-up prod-down prod-logs prod-deploy \
+# BatchMode=yes — fail fast instead of prompting for password
+# Run `ssh-add ~/.ssh/norwegian-honey` once per session if your key has a passphrase
+SSH_CMD = ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+	-i $(PROD_SSH_KEY) -p $(PROD_SSH_PORT) $(PROD_SSH)
+
+.PHONY: help help-local help-ngrok install \
         health analyze-headers analyze-headers-sample analyze-eml \
         osint-query osint-query-sample osint-from-analysis osint-from-sample \
-        canary-token canary-hit canary-demo canary-logs canary-logs-local canary-logs-docker \
-        cli-eml cli-headers docs ngrok-install ngrok-setup ngrok-tunnel ngrok-tunnel-ephemeral \
-        ngrok-check ngrok-url health-public canary-token-public canary-token-ngrok
+        canary-token canary-hit canary-demo canary-logs \
+        local-dev local-docker-up local-docker-down local-docker-logs \
+        local-health local-analyze-headers local-analyze-headers-sample local-analyze-eml \
+        local-osint-query local-osint-query-sample local-osint-from-analysis local-osint-from-sample \
+        local-canary-token local-canary-hit local-canary-demo \
+        local-canary-logs local-canary-logs-local local-canary-logs-docker \
+        local-cli-eml local-cli-headers local-docs \
+        prod-canary-logs prod-deploy prod-up prod-down prod-logs \
+        ngrok-install ngrok-setup ngrok-check ngrok-tunnel ngrok-tunnel-ephemeral ngrok-url \
+        ngrok-health ngrok-canary-token
 
-help: ## Show this help
-	@echo "Norwegian Honey — make targets"
+# =============================================================================
+# HELP
+# =============================================================================
+
+help: ## Production API (default) — targets cloud at $(PROD_URL)
+	@echo "Norwegian Honey — production targets  →  $(PROD_URL)"
+	@echo "Config: make.env (copy from make.env.example)"
+	@echo "Override: make health PROD_URL=https://other.domain"
+	@echo "PRETTY=1  pretty-print JSON"
 	@echo ""
-	@echo "Config (override on CLI):"
-	@echo "  BASE_URL=$(BASE_URL)"
-	@echo "  PUBLIC_URL=$(PUBLIC_URL)  (from $(NGROK_CONFIG))"
-	@echo "  CANARY_BASE_URL=$(CANARY_BASE_URL)  (canary-token embed URL)"
-	@echo "  NGROK_TUNNEL=$(NGROK_TUNNEL)"
-	@echo "  EML=$(EML)"
-	@echo "  CANARY_DB=$(CANARY_DB)"
-	@echo "  PRETTY=1          pretty-print JSON responses"
+	@grep -E '^[a-zA-Z0-9_-]+:.*## \[prod\]' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*## \\[prod\\] "}; {printf "  \033[36m%-28s\033[0m %s\n", $$1, $$2}'
 	@echo ""
-	@grep -E '^[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
+	@echo "Other: make help-local | make help-ngrok | make help-server"
 
-# --- Setup & server ---
+help-local: ## Local dev targets — localhost:$(LOCAL_PORT)
+	@echo "Local dev  →  $(LOCAL_URL)"
+	@echo ""
+	@grep -E '^local-[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) | \
+		sed 's/^local-//' | \
+		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[33m%-28s\033[0m %s\n", $$1, $$2}'
 
-install: ## Create venv and install dependencies
+help-ngrok: ## ngrok tunnel targets (local dev + public URL)
+	@echo "ngrok  →  $(NGROK_URL)"
+	@echo ""
+	@grep -E '^ngrok-[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) | \
+		sed 's/^ngrok-//' | \
+		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[35m%-28s\033[0m %s\n", $$1, $$2}'
+
+help-server: ## Server-side deploy targets (run on VPS)
+	@echo "Server deploy (on VPS)"
+	@echo ""
+	@grep -E '^prod-(up|down|logs|deploy):.*##' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[32m%-28s\033[0m %s\n", $$1, $$2}'
+
+# =============================================================================
+# SETUP
+# =============================================================================
+
+install: ## [local] Create venv and install dependencies
 	python3 -m venv $(VENV)
 	$(PYTHON) -m pip install -r requirements.txt
 	@test -f .env || cp .env.example .env
-	@echo "Edit .env if needed (DEBUG=true, CANARY_SQLITE_PATH=./data/canary.db)"
+	@test -f make.env || cp make.env.example make.env
+	@echo "Edit make.env → PROD_URL, PROD_SSH for cloud targets"
 
-dev: ## Run FastAPI locally with reload
-	$(UVICORN) app.main:app --host $(HOST) --port $(PORT) --reload
+# =============================================================================
+# PRODUCTION — call cloud API from your machine (default)
+# =============================================================================
 
-docker-up: ## Start stack with Docker Compose
-	docker compose up --build -d
+health: ## [prod] GET /health
+	curl -s "$(API_URL)/health" $(FORMAT)
 
-docker-down: ## Stop Docker Compose stack
-	docker compose down
+domain-ip:
+	dig +short $(DOMAIN)
+	dig +short www.$(DOMAIN)
+	dig +short api.$(DOMAIN)
+	dig +short www.api.$(DOMAIN)
+	dig +short www.api.$(DOMAIN)
 
-docker-logs: ## Tail API container logs
-	docker compose logs -f api
-
-prod-up: ## Production deploy (Caddy + HTTPS) — set DOMAIN in .env
-	docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-
-prod-down: ## Stop production stack
-	docker compose -f docker-compose.yml -f docker-compose.prod.yml down
-
-prod-logs: ## Tail production logs (api + caddy)
-	docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f api caddy
-
-prod-deploy: ## Run deploy script (build, up, health check)
-	bash deploy/deploy.sh
-
-docs: ## Open Swagger UI URL
-	@echo "$(BASE_URL)/docs  (requires DEBUG=true in .env)"
-
-# --- Health ---
-
-health: ## GET /health
-	curl -s "$(BASE_URL)/health" $(FORMAT)
-
-# --- Analyze ---
-
-analyze-headers: ## POST /analyze/headers (set HEADERS=path to a raw headers file)
+analyze-headers: ## [prod] POST /analyze/headers (HEADERS=path)
 	@test -n "$(HEADERS)" || (echo "Usage: make analyze-headers HEADERS=path/to/headers.txt"; exit 1)
-	curl -s -X POST "$(BASE_URL)/analyze/headers" \
+	curl -s -X POST "$(API_URL)/analyze/headers" \
 		-H "Content-Type: application/json" \
 		-d "$$($(PYTHON) -c "import json, pathlib; print(json.dumps({'raw_headers': pathlib.Path('$(HEADERS)').read_text()}))")" \
 		$(FORMAT)
 
-analyze-headers-sample: ## POST /analyze/headers with built-in phishing sample
-	curl -s -X POST "$(BASE_URL)/analyze/headers" \
+analyze-headers-sample: ## [prod] POST /analyze/headers (built-in sample)
+	curl -s -X POST "$(API_URL)/analyze/headers" \
 		-H "Content-Type: application/json" \
 		-d '{"raw_headers":"From: scammer@evil-phish.example\nReply-To: collector@different-bad.example\nReturn-Path: <bounce@evil-phish.example>\nSubject: Urgent wire transfer\nAuthentication-Results: mx.example.com; spf=fail; dkim=fail; dmarc=fail\nReceived: from mail.badactor.example ([198.51.100.10]) by mx.example.com; Mon, 1 Jan 2024 11:59:00 +0000\nX-Originating-IP: [203.0.113.99]\n"}' \
 		$(FORMAT)
 
-analyze-eml: ## POST /analyze/eml (EML=fixtures/sample.eml)
-	curl -s -X POST "$(BASE_URL)/analyze/eml" \
+analyze-eml: ## [prod] POST /analyze/eml (EML=path)
+	curl -s -X POST "$(API_URL)/analyze/eml" \
 		-F "file=@$(EML)" \
 		$(FORMAT)
 
-# --- OSINT ---
-
-osint-query: ## POST /osint/query (IPS= DOMAINS= EMAILS= comma-separated)
-	curl -s -X POST "$(BASE_URL)/osint/query" \
+osint-query: ## [prod] POST /osint/query (IPS= DOMAINS= EMAILS=)
+	curl -s -X POST "$(API_URL)/osint/query" \
 		-H "Content-Type: application/json" \
-		-d "$$($(PYTHON) -c "import json, os; ips=[x for x in '$(IPS)'.split(',') if x]; domains=[x for x in '$(DOMAINS)'.split(',') if x]; emails=[x for x in '$(EMAILS)'.split(',') if x]; print(json.dumps({'ips': ips, 'domains': domains, 'emails': emails}))")" \
+		-d "$$($(PYTHON) -c "import json; ips=[x for x in '$(IPS)'.split(',') if x]; domains=[x for x in '$(DOMAINS)'.split(',') if x]; emails=[x for x in '$(EMAILS)'.split(',') if x]; print(json.dumps({'ips': ips, 'domains': domains, 'emails': emails}))")" \
 		$(FORMAT)
 
-osint-query-sample: ## POST /osint/query with 8.8.8.8 and example.com
+osint-query-sample: ## [prod] POST /osint/query (8.8.8.8, example.com)
 	$(MAKE) osint-query IPS=8.8.8.8 DOMAINS=example.com
 
-osint-from-analysis: ## POST /osint/from-analysis (ANALYSIS=path/to/analysis.json)
+osint-from-analysis: ## [prod] POST /osint/from-analysis (ANALYSIS=file.json)
 	@test -n "$(ANALYSIS)" || (echo "Usage: make osint-from-analysis ANALYSIS=analysis.json"; exit 1)
-	curl -s -X POST "$(BASE_URL)/osint/from-analysis" \
+	curl -s -X POST "$(API_URL)/osint/from-analysis" \
 		-H "Content-Type: application/json" \
 		-d "@$(ANALYSIS)" \
 		$(FORMAT)
 
-osint-from-sample: ## Analyze sample headers, then run OSINT on extracted entities
-	curl -s -X POST "$(BASE_URL)/analyze/headers" \
+osint-from-sample: ## [prod] Analyze sample → OSINT pipeline
+	curl -s -X POST "$(API_URL)/analyze/headers" \
 		-H "Content-Type: application/json" \
 		-d '{"raw_headers":"From: scammer@evil-phish.example\nReply-To: collector@different-bad.example\nAuthentication-Results: mx.example.com; spf=fail; dkim=fail; dmarc=fail\nReceived: from mail.badactor.example ([198.51.100.10]) by mx.example.com; Mon, 1 Jan 2024 11:59:00 +0000\nX-Originating-IP: [203.0.113.99]\n"}' \
-	| curl -s -X POST "$(BASE_URL)/osint/from-analysis" \
+	| curl -s -X POST "$(API_URL)/osint/from-analysis" \
 		-H "Content-Type: application/json" \
 		-d @- \
 		$(FORMAT)
 
-# --- Canary honeypot ---
+canary-token: ## [prod] Generate canary embed for $(PROD_URL)
+	$(PYTHON) scripts/generate_canary_token.py --base-url "$(API_URL)" --count 1
 
-canary-token: ## Generate canary token (uses ngrok domain from ngrok.yml)
-	$(PYTHON) scripts/generate_canary_token.py --base-url "$(CANARY_BASE_URL)" --count 1
-
-canary-hit: ## Trigger pixel (TOKEN=required; uses CANARY_BASE_URL)
+canary-hit: ## [prod] Trigger pixel (TOKEN=required)
 	@test -n "$(TOKEN)" || (echo "Usage: make canary-hit TOKEN=your-token"; exit 1)
 	curl -s -H "User-Agent: Makefile-Test/1.0" \
-		"$(CANARY_BASE_URL)/images/$(TOKEN).png" \
+		"$(API_URL)/images/$(TOKEN).png" \
 		-o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"
 
-canary-demo: ## Generate token, hit pixel via ngrok, show latest DB row
-	@TOKEN="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(CANARY_BASE_URL)" --count 1 --json \
+canary-demo: ## [prod] Generate token, hit pixel on cloud
+	@TOKEN="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(API_URL)" --count 1 --json \
 		| $(PYTHON) -c "import sys,json; print(json.load(sys.stdin)['token'])")"; \
 	echo "token: $$TOKEN"; \
 	curl -s -H "User-Agent: Makefile-Test/1.0" \
-		"$(CANARY_BASE_URL)/images/$$TOKEN.png" \
+		"$(API_URL)/images/$$TOKEN.png" \
 		-o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"; \
-	$(MAKE) canary-logs
+	echo "Check logs: make prod-canary-logs"
 
-canary-logs: ## Show last 10 canary hits (auto: docker if running, else local)
+canary-logs: prod-canary-logs ## [prod] Alias — canary hits on server
+
+prod-canary-logs: ## [prod] Canary hits via SSH on VPS
+	$(SSH_CMD) "cd $(PROD_REMOTE_DIR) && docker compose exec -T $(DOCKER_SERVICE) python -c \"\
+import sqlite3; \
+db=sqlite3.connect('$(DOCKER_CANARY_DB)'); \
+rows=db.execute('SELECT id, token, client_ip, user_agent, timestamp FROM canary_hits ORDER BY id DESC LIMIT 10').fetchall(); \
+print('id|token|client_ip|user_agent|timestamp'); \
+[print('|'.join(str(c) if c is not None else '' for c in r)) for r in rows] or print('(no hits)')\""
+
+# =============================================================================
+# LOCAL DEV — run server on localhost
+# =============================================================================
+
+local-dev: ## Run uvicorn with reload on $(LOCAL_URL)
+	$(UVICORN) app.main:app --host $(HOST) --port $(LOCAL_PORT) --reload
+
+local-docker-up: ## Start local Docker stack (port $(LOCAL_PORT))
+	docker compose up --build -d
+
+local-docker-down: ## Stop local Docker stack
+	docker compose down
+
+local-docker-logs: ## Tail local API container logs
+	docker compose logs -f api
+
+local-health: ## GET /health on localhost
+	$(MAKE) health API_URL=$(LOCAL_URL)
+
+local-analyze-headers: ## POST /analyze/headers on localhost
+	$(MAKE) analyze-headers API_URL=$(LOCAL_URL) HEADERS="$(HEADERS)"
+
+local-analyze-headers-sample: ## POST /analyze/headers sample on localhost
+	$(MAKE) analyze-headers-sample API_URL=$(LOCAL_URL)
+
+local-analyze-eml: ## POST /analyze/eml on localhost
+	$(MAKE) analyze-eml API_URL=$(LOCAL_URL) EML="$(EML)"
+
+local-osint-query: ## POST /osint/query on localhost
+	$(MAKE) osint-query API_URL=$(LOCAL_URL) IPS="$(IPS)" DOMAINS="$(DOMAINS)" EMAILS="$(EMAILS)"
+
+local-osint-query-sample: ## POST /osint/query sample on localhost
+	$(MAKE) osint-query-sample API_URL=$(LOCAL_URL)
+
+local-osint-from-analysis: ## POST /osint/from-analysis on localhost
+	$(MAKE) osint-from-analysis API_URL=$(LOCAL_URL) ANALYSIS="$(ANALYSIS)"
+
+local-osint-from-sample: ## Analyze → OSINT on localhost
+	$(MAKE) osint-from-sample API_URL=$(LOCAL_URL)
+
+local-canary-token: ## Generate canary token for localhost
+	$(PYTHON) scripts/generate_canary_token.py --base-url "$(LOCAL_URL)" --count 1
+
+local-canary-hit: ## Trigger pixel on localhost (TOKEN=)
+	@test -n "$(TOKEN)" || (echo "Usage: make local-canary-hit TOKEN=your-token"; exit 1)
+	curl -s -H "User-Agent: Makefile-Test/1.0" \
+		"$(LOCAL_URL)/images/$(TOKEN).png" \
+		-o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"
+
+local-canary-demo: ## Generate token, hit pixel locally, show DB
+	@TOKEN="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(LOCAL_URL)" --count 1 --json \
+		| $(PYTHON) -c "import sys,json; print(json.load(sys.stdin)['token'])")"; \
+	echo "token: $$TOKEN"; \
+	curl -s -H "User-Agent: Makefile-Test/1.0" \
+		"$(LOCAL_URL)/images/$$TOKEN.png" \
+		-o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"; \
+	$(MAKE) local-canary-logs
+
+local-canary-logs: ## Canary hits — local docker if running, else local SQLite
 	@if docker compose ps --status running -q $(DOCKER_SERVICE) 2>/dev/null | grep -q .; then \
-		echo "Reading from Docker ($(DOCKER_CANARY_DB))..."; \
-		$(MAKE) canary-logs-docker; \
+		$(MAKE) local-canary-logs-docker; \
 	else \
-		echo "Reading from local ($(CANARY_DB))..."; \
-		$(MAKE) canary-logs-local; \
+		$(MAKE) local-canary-logs-local; \
 	fi
 
-canary-logs-local: ## Show last 10 canary hits from local SQLite
+local-canary-logs-local: ## Canary hits from ./data/canary.db
 	@$(PYTHON) -c "import sqlite3, pathlib; \
-db_path=pathlib.Path('$(CANARY_DB)'); \
-print(f'DB: {db_path.resolve()}'); \
-conn=sqlite3.connect(db_path); \
+db=pathlib.Path('$(CANARY_DB)'); print(f'DB: {db.resolve()}'); \
+conn=sqlite3.connect(db); \
 rows=conn.execute('SELECT id, token, client_ip, user_agent, timestamp FROM canary_hits ORDER BY id DESC LIMIT 10').fetchall(); \
 print('id|token|client_ip|user_agent|timestamp'); \
 [print('|'.join(str(c) if c is not None else '' for c in r)) for r in rows] if rows else print('(no hits)')"
 
-canary-logs-docker: ## Show last 10 canary hits from SQLite inside Docker
+local-canary-logs-docker: ## Canary hits from local Docker volume
 	docker compose exec -T $(DOCKER_SERVICE) python -c "\
 import sqlite3; \
 db=sqlite3.connect('$(DOCKER_CANARY_DB)'); \
@@ -188,77 +279,79 @@ rows=db.execute('SELECT id, token, client_ip, user_agent, timestamp FROM canary_
 print('id|token|client_ip|user_agent|timestamp'); \
 [print('|'.join(str(c) if c is not None else '' for c in r)) for r in rows] or print('(no hits)')"
 
-
-# --- CLI (no server) ---
-
-cli-eml: ## Analyze .eml via CLI (EML=fixtures/sample.eml)
+local-cli-eml: ## Analyze .eml offline (no server)
 	$(PYTHON) -m app.cli.header_eval --eml "$(EML)" --pretty
 
-cli-headers: ## Analyze headers file via CLI (HEADERS=required)
-	@test -n "$(HEADERS)" || (echo "Usage: make cli-headers HEADERS=path/to/headers.txt"; exit 1)
+local-cli-headers: ## Analyze headers file offline (HEADERS=)
+	@test -n "$(HEADERS)" || (echo "Usage: make local-cli-headers HEADERS=path"; exit 1)
 	$(PYTHON) -m app.cli.header_eval --headers-file "$(HEADERS)" --headers-only --pretty
 
-# --- ngrok (expose local API to the internet) ---
-# Edit ngrok.yml for domain/port. Authtoken in ngrok.local.yml (make ngrok-setup).
+local-docs: ## Print local Swagger URL
+	@echo "$(LOCAL_URL)/docs  (requires DEBUG=true in .env)"
 
-ngrok-install: ## Install ngrok binary to ~/.local/bin
+# =============================================================================
+# NGROK — local dev with public tunnel (optional)
+# =============================================================================
+
+ngrok-install: ## Install ngrok to ~/.local/bin
 	@mkdir -p $(HOME)/.local/bin
 	curl -sSL "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" -o /tmp/ngrok.tgz
 	tar -xzf /tmp/ngrok.tgz -C $(HOME)/.local/bin ngrok
 	@echo "Installed: $$($(NGROK) version)"
 	@$(MAKE) ngrok-setup
 
-ngrok-setup: ## Create ngrok.local.yml from example (add your authtoken)
+ngrok-setup: ## Create ngrok.local.yml (add authtoken)
 	@test -f $(NGROK_LOCAL_CONFIG) || cp ngrok.local.yml.example $(NGROK_LOCAL_CONFIG)
-	@echo "Edit $(NGROK_LOCAL_CONFIG) and set authtoken"
-	@echo "  https://dashboard.ngrok.com/get-started/your-authtoken"
-	@echo "Tunnel config: $(NGROK_CONFIG) -> $(PUBLIC_URL)"
+	@echo "Edit $(NGROK_LOCAL_CONFIG) with your authtoken"
+	@echo "Tunnel: $(NGROK_CONFIG) → $(NGROK_URL)"
 
-ngrok-check: ## Validate ngrok config files
-	@test -x "$(NGROK)" || (echo "ngrok not found — run: make ngrok-install"; exit 1)
-	@test -f "$(NGROK_CONFIG)" || (echo "missing $(NGROK_CONFIG)"; exit 1)
+ngrok-check: ## Validate ngrok config
+	@test -x "$(NGROK)" || (echo "run: make ngrok-install"; exit 1)
 	@if [ -f "$(NGROK_LOCAL_CONFIG)" ]; then \
 		$(NGROK) config check --config "$(NGROK_LOCAL_CONFIG)" --config "$(NGROK_CONFIG)"; \
 	elif [ -f "$(NGROK_GLOBAL_CONFIG)" ]; then \
 		$(NGROK) config check --config "$(NGROK_GLOBAL_CONFIG)" --config "$(NGROK_CONFIG)"; \
-	else \
-		echo "No authtoken config — run: make ngrok-setup"; exit 1; \
-	fi
+	else echo "run: make ngrok-setup"; exit 1; fi
 
-ngrok-tunnel: ## Start tunnel from ngrok.yml (tunnel: $(NGROK_TUNNEL))
-	@test -x "$(NGROK)" || (echo "ngrok not found — run: make ngrok-install"; exit 1)
-	@echo "Config: $(NGROK_CONFIG)"
-	@echo "Public: $(PUBLIC_URL) -> 127.0.0.1:$(NGROK_PORT)"
-	@echo "Inspect: $(NGROK_API)"
+ngrok-tunnel: ## Start ngrok tunnel (run local-dev in another terminal)
+	@test -x "$(NGROK)" || (echo "run: make ngrok-install"; exit 1)
+	@echo "$(NGROK_URL) → 127.0.0.1:$(NGROK_PORT)"
 	@if [ -f "$(NGROK_LOCAL_CONFIG)" ]; then \
 		$(NGROK) start --config "$(NGROK_LOCAL_CONFIG)" --config "$(NGROK_CONFIG)" $(NGROK_TUNNEL); \
 	elif [ -f "$(NGROK_GLOBAL_CONFIG)" ]; then \
 		$(NGROK) start --config "$(NGROK_GLOBAL_CONFIG)" --config "$(NGROK_CONFIG)" $(NGROK_TUNNEL); \
-	else \
-		echo "No authtoken — run: make ngrok-setup"; exit 1; \
-	fi
+	else echo "run: make ngrok-setup"; exit 1; fi
 
-ngrok-tunnel-ephemeral: ## Ephemeral URL (ignores reserved domain in ngrok.yml)
-	@test -x "$(NGROK)" || (echo "ngrok not found — run: make ngrok-install"; exit 1)
+ngrok-tunnel-ephemeral: ## Ephemeral ngrok URL (no reserved domain)
+	@test -x "$(NGROK)" || (echo "run: make ngrok-install"; exit 1)
 	@if [ -f "$(NGROK_LOCAL_CONFIG)" ]; then \
 		$(NGROK) http --config "$(NGROK_LOCAL_CONFIG)" $(NGROK_PORT); \
-	elif [ -f "$(NGROK_GLOBAL_CONFIG)" ]; then \
-		$(NGROK) http --config "$(NGROK_GLOBAL_CONFIG)" $(NGROK_PORT); \
-	else \
-		echo "No authtoken — run: make ngrok-setup"; exit 1; \
-	fi
+	else $(NGROK) http --config "$(NGROK_GLOBAL_CONFIG)" $(NGROK_PORT); fi
 
-ngrok-url: ## Print active ngrok HTTPS URL (falls back to PUBLIC_URL)
+ngrok-url: ## Print active ngrok HTTPS URL
 	@curl -sf $(NGROK_API)/api/tunnels 2>/dev/null \
-	| $(PYTHON) -c "import sys,json; d=json.load(sys.stdin); t=next((x for x in d.get('tunnels',[]) if x.get('public_url','').startswith('https')), None); print(t['public_url'] if t else '$(PUBLIC_URL)')" \
-	|| echo "$(PUBLIC_URL)"
+	| $(PYTHON) -c "import sys,json; d=json.load(sys.stdin); t=next((x for x in d.get('tunnels',[]) if x.get('public_url','').startswith('https')), None); print(t['public_url'] if t else '$(NGROK_URL)')" \
+	|| echo "$(NGROK_URL)"
 
-health-public: ## GET /health via ngrok public URL
-	curl -s "$(PUBLIC_URL)/health" $(FORMAT)
+ngrok-health: ## GET /health via ngrok URL
+	@URL=$$($(MAKE) -s ngrok-url); curl -s "$$URL/health" $(FORMAT)
 
-canary-token-public: canary-token ## Alias for canary-token (ngrok domain)
-
-canary-token-ngrok: ## Generate canary token using live ngrok tunnel URL
+ngrok-canary-token: ## Generate canary token for ngrok URL
 	@URL=$$($(MAKE) -s ngrok-url); \
 	$(PYTHON) scripts/generate_canary_token.py --base-url "$$URL" --count 1
 
+# =============================================================================
+# SERVER — run ON the VPS
+# =============================================================================
+
+prod-up: ## [server] Start production stack (Caddy + API)
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+
+prod-down: ## [server] Stop production stack
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml down
+
+prod-logs: ## [server] Tail API + Caddy logs
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f api caddy
+
+prod-deploy: ## [server] Build, start, health check
+	bash deploy/deploy.sh

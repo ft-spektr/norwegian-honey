@@ -22,28 +22,41 @@ A lightweight, self-hosted investigative toolkit for analyzing phishing and scam
 
 Production adds **Caddy** for automatic HTTPS in front of the API.
 
-## Quick start
+## Quick start (production — cloud at spek-tr.no)
 
 ```bash
-git clone git@github.com:ft-spektr/norwegian-honey.git
-cd norwegian-honey
-
-make install          # venv + dependencies + .env
-make dev              # http://127.0.0.1:8000
-
+cp make.env.example make.env    # set PROD_SSH for canary logs
 make health PRETTY=1
-make analyze-eml EML=fixtures/sample.eml PRETTY=1
+make analyze-eml EML=suspicious.eml PRETTY=1
+make canary-token
+make prod-canary-logs
+```
+
+## Local development
+
+```bash
+make install
+make local-dev                  # http://127.0.0.1:8000
+make local-health PRETTY=1
+make help-local                 # all local-* targets
 ```
 
 With `DEBUG=true` in `.env`, interactive API docs are at `/docs`.
 
-## Docker
+## Makefile targets
+
+| Command | What |
+|---------|------|
+| `make help` | **Production** — calls `https://spek-tr.no` (default) |
+| `make help-local` | Local dev — `local-*` targets |
+| `make help-ngrok` | ngrok tunnel dev — `ngrok-*` targets |
+| `make help-server` | Deploy commands to run on the VPS |
 
 ```bash
-cp .env.example .env
-make docker-up
-make health
-make canary-logs-docker
+make analyze-eml EML=phish.eml PRETTY=1      # → production
+make local-analyze-eml EML=phish.eml PRETTY=1  # → localhost
+make canary-token                              # → spek-tr.no embed URL
+make prod-canary-logs                          # → SSH to VPS, read DB
 ```
 
 ## API endpoints
@@ -59,13 +72,13 @@ make canary-logs-docker
 
 ## Makefile shortcuts
 
-Run `make help` for the full list. Common targets:
+Run `make help` for production targets (default). See also `make help-local`.
 
 ```bash
 make analyze-eml EML=suspicious.eml PRETTY=1
 make osint-from-analysis ANALYSIS=analysis.json PRETTY=1
 make canary-token
-make canary-logs
+make prod-canary-logs
 ```
 
 ## CLI (no server required)
@@ -89,16 +102,17 @@ TRUSTED_PROXY_HEADERS=true  # keep true behind ngrok/Caddy
 
 OSINT modules skip gracefully when API keys are missing.
 
-## Local testing with ngrok
+## Local testing with ngrok (optional)
 
-Expose the API to the internet for canary pixel testing:
+For exposing a **local** server — not needed when production is live at spek-tr.no:
 
 ```bash
-cp ngrok.yml.example ngrok.yml    # edit domain if needed
-make ngrok-setup                  # create ngrok.local.yml + authtoken
-make ngrok-tunnel                 # terminal 2 (while make dev runs)
-make canary-token                 # uses domain from ngrok.yml
+make local-dev                  # terminal 1
+make ngrok-tunnel               # terminal 2
+make ngrok-canary-token
 ```
+
+See `make help-ngrok`.
 
 ## Production deployment
 
