@@ -8,6 +8,8 @@ A lightweight, self-hosted investigative toolkit for analyzing phishing and scam
 |-----------|-------------|
 | **Header Evaluator** | Parse `.eml` files or raw headers — routing hops, SPF/DKIM/DMARC, anomaly detection |
 | **OSINT Aggregator** | Enrich IPs, domains, and emails via ipinfo.io, AbuseIPDB, and WHOIS |
+| **Threat Score Report** | Combine analysis + OSINT into a 0–100 phishing/spam score with category breakdown |
+| **Report Visualizer** | Pandas tables + HTML export for investigation, threat, analysis, and OSINT JSON |
 | **Canary Honeypot** | Hidden tracking pixel and portfolio link trap — logs IP, User-Agent, and timestamp |
 
 ## Architecture
@@ -17,6 +19,7 @@ Internet → Caddy (HTTPS, rate limits) → FastAPI (Docker) → SQLite
                 │
     /analyze ───┼─── header parsing + DNS auth checks
     /osint   ───┼─── OSINT APIs + TTL cache
+    /report  ───┼─── threat score from analysis + OSINT
     /images  ───┼─── 1×1 tracking pixel
     /portfolio ─┴─── generic HTML decoy page
 ```
@@ -27,7 +30,7 @@ Production uses **Caddy** for automatic HTTPS, per-IP rate limiting, and counter
 
 ```bash
 cp make.env.example make.env          # PROD_SSH for remote canary ops
-cp .env.example .env                  # INVESTIGATOR_API_KEY for /analyze + /osint
+cp .env.example .env                  # INVESTIGATOR_API_KEY for /analyze, /osint, /report
 ssh-add ~/.ssh/norwegian-honey        # if your deploy key has a passphrase
 
 make health PRETTY=1
@@ -45,7 +48,7 @@ make local-health PRETTY=1
 make help-local                       # all local-* targets
 ```
 
-With `DEBUG=true` in `.env`, `/analyze` and `/osint` work without an API key and docs are at `/docs`.
+With `DEBUG=true` in `.env`, `/analyze`, `/osint`, and `/report` work without an API key and docs are at `/docs`.
 
 ## Makefile targets
 
@@ -59,7 +62,32 @@ With `DEBUG=true` in `.env`, `/analyze` and `/osint` work without an API key and
 ```bash
 make analyze-eml EML=phish.eml PRETTY=1       # production
 make local-analyze-eml EML=phish.eml PRETTY=1 # localhost
+make report-from-analysis ANALYSIS=analysis.json PRETTY=1
+make local-cli-report ANALYSIS=analysis.json OUT=report.json
+make local-visualize REPORT=investigation.json HTML=investigation.html
+make json-extract IN=capture.json OUT=clean.json
 ```
+
+### Saving API output to files
+
+Redirect **curl output only** — not a dry-run recipe:
+
+```bash
+# Good — JSON response only
+make osint-query IPS=1.2.3.4 PRETTY=1 > osint.json
+make analyze-eml EML=phish.eml PRETTY=1 > analysis.json
+
+# Bad — make -n prints the curl command, not the response
+make -n osint-query IPS=1.2.3.4 > capture.json
+```
+
+If a capture file includes curl/Makefile lines at the top, tools still work — they auto-extract the JSON. To strip noise (and embedded API keys from the recipe):
+
+```bash
+make json-extract IN=capture.json OUT=clean.json
+```
+
+Do not commit capture files that echo `X-API-Key` in the curl header line.
 
 ## API endpoints
 
@@ -70,10 +98,79 @@ make local-analyze-eml EML=phish.eml PRETTY=1 # localhost
 | `POST` | `/analyze/eml` | API key* | Upload `.eml` file |
 | `POST` | `/osint/query` | API key* | OSINT lookup for IPs, domains, emails |
 | `POST` | `/osint/from-analysis` | API key* | OSINT on `/analyze` output |
+| `POST` | `/report/score` | API key* | Threat score from analysis + optional OSINT JSON |
+| `POST` | `/report/from-analysis` | API key* | OSINT on analysis, then threat score report |
+| `POST` | `/report/canary-investigation` | API key* | Canary hits + IP profiles + optional OSINT/analysis |
 | `GET` | `/images/{token}.png` | — | Hidden tracking pixel |
 | `GET` | `/portfolio/{token}` | — | Portfolio link trap (generic HTML) |
 
 \* `X-API-Key` header required in production (`INVESTIGATOR_API_KEY`). Canary paths stay open — mail clients cannot send API keys.
+
+## Threat score report
+
+Produces a **0–100 overall score** with verdict (`low` / `moderate` / `high` / `critical`) and findings grouped by category:
+
+| Category | Weight | Signals |
+|----------|--------|---------|
+| **identity** | 40% | Reply-To mismatch, business name on free webmail, domain-like Gmail local part |
+| **headers** | 30% | Anomalies from header analysis (weighted down for recipient MX noise) |
+| **authentication** | 15% | SPF/DKIM/DMARC pass/fail from headers |
+| **infrastructure** | 15% | AbuseIPDB, ipinfo, WHOIS on sender-relevant entities only |
+
+```bash
+# Full pipeline (API runs OSINT, then scores)
+make analyze-eml EML=suspicious.eml > analysis.json
+make report-from-analysis ANALYSIS=analysis.json PRETTY=1
+
+# Score existing analysis + OSINT files
+make osint-from-analysis ANALYSIS=analysis.json > osint.json
+make report-score ANALYSIS=analysis.json OSINT=osint.json PRETTY=1
+
+# CLI only — no server; runs OSINT locally unless --skip-osint
+make local-cli-report ANALYSIS=analysis.json OUT=report.json
+python -m app.cli.threat_report analysis.json --osint osint.json -o report.json
+```
+
+Report output includes `overall_score`, `verdict`, `summary`, per-category scores, and a flat `findings` list sorted by severity.
+
+## Canary investigation export
+
+Merges **canary hit logs**, **per-IP OSINT profiles**, and optional **analysis** / **threat report** into one JSON artifact for evidence preservation.
+
+```bash
+make prod-canary-export TOKEN=myprofile TRAP=portfolio OUT=investigation.json
+make local-canary-export TOKEN=myprofile OUT=investigation.json \
+  OSINT=canary-osint.json ANALYSIS=analysis.json REPORT=report.json
+python scripts/export_canary_investigation.py --db-path ./data/canary.db \
+  --token myprofile --trap portfolio --run-osint \
+  --analysis analysis.json --threat-report report.json -o investigation.json
+```
+
+Each `ip_profiles[]` entry includes hit IDs, user-agents, OSINT data, a `role` (`human_likely` / `automation_likely` / `unknown`), and investigator notes.
+
+### Readable tables (pandas)
+
+Requires `pandas` (installed via `make install`).
+
+```bash
+make local-visualize REPORT=investigation.json
+make local-visualize REPORT=investigation.json HTML=investigation.html TEXT=investigation.txt
+make local-visualize REPORT=report.json          # threat score
+make local-visualize REPORT=analysis.json        # header analysis
+make local-visualize REPORT=osint.json           # OSINT only
+python -m app.cli.visualize_report investigation.json --html investigation.html
+```
+
+Auto-detects report type and prints:
+
+| Input | Tables |
+|-------|--------|
+| `investigation.json` | overview, timeline, IP profiles (+ embedded threat/analysis if present) |
+| `report.json` | threat overview, category scores, findings |
+| `analysis.json` | email overview, received hops, anomalies |
+| OSINT JSON | IPs, domains |
+
+Use `HTML=` for a browser-friendly export. Mixed curl/JSON capture files are supported (see [Saving API output](#saving-api-output-to-files)).
 
 ## Canary workflow
 
@@ -93,6 +190,11 @@ make canary-hit TOKEN=your-token TRAP=portfolio
 
 # View hits (production DB via SSH)
 make prod-canary-logs
+
+# Export investigation artifact (hits + OSINT + optional analysis/report)
+make prod-canary-export TOKEN=myprofile TRAP=portfolio OUT=investigation.json
+make local-canary-export TOKEN=myprofile TRAP=portfolio OUT=investigation.json \
+  OSINT=canary-osint.json ANALYSIS=analysis.json REPORT=report.json
 
 # Flush logs (hits + registered tokens)
 make prod-canary-flush
@@ -116,7 +218,13 @@ make prod-canary-flush KEEP_TOKENS=1     # hits only, keep tokens
 ```bash
 make local-cli-eml EML=suspicious.eml
 make local-cli-headers HEADERS=headers.txt
+make local-cli-report ANALYSIS=analysis.json OUT=report.json
+make local-visualize REPORT=investigation.json HTML=investigation.html
+make json-extract IN=capture.json OUT=clean.json
 python -m app.cli.header_eval --eml suspicious.eml --pretty
+python -m app.cli.threat_report analysis.json --osint osint.json -o report.json
+python -m app.cli.visualize_report investigation.json
+python scripts/extract_json.py capture.json -o clean.json
 ```
 
 ## Configuration
@@ -178,26 +286,30 @@ Requires a **VPS with SSH** — SFTP-only shared hosting will not work.
 
 ```
 app/
-  routers/          # /analyze, /osint, /canary
-  services/         # header parsing, OSINT clients, canary storage
+  routers/          # /analyze, /osint, /report, /canary
+  services/         # header parsing, OSINT, threat scorer, canary, report visualizer
   models/           # Pydantic schemas
-  cli/              # standalone header analyzer
+  core/             # json_document loader (curl-noise tolerant)
+  cli/              # header_eval, threat_report, visualize_report
 deploy/             # Caddy, VPS setup & deploy scripts
-scripts/            # canary token generator, register, flush
+scripts/            # canary tokens, export investigation, extract_json, flush
 fixtures/           # sample .eml for testing
 ```
 
 ## Typical workflow
 
-1. **Analyze** — `make analyze-eml EML=phish.eml` → hops, auth results, anomalies
-2. **OSINT** — `make osint-from-analysis ANALYSIS=out.json` for IP/domain enrichment
-3. **Canary** — `make canary-token TRAP=portfolio` → embed in a controlled reply → `make prod-canary-logs`
+1. **Analyze** — `make analyze-eml EML=phish.eml PRETTY=1 > analysis.json`
+2. **OSINT** — `make osint-from-analysis ANALYSIS=analysis.json PRETTY=1 > osint.json`
+3. **Report** — `make report-from-analysis ANALYSIS=analysis.json PRETTY=1 > report.json`
+4. **Canary** — `make canary-token TRAP=portfolio` → embed full `https://` link → `make prod-canary-logs`
+5. **Export** — `make prod-canary-export TOKEN=... OUT=investigation.json` after hits land
+6. **Visualize** — `make local-visualize REPORT=investigation.json HTML=investigation.html`
 
 ## OpSec notes
 
 Scammers who discover the canary may try to flood, probe, or abuse your server. Defenses in place:
 
-- **`INVESTIGATOR_API_KEY`** — `/analyze` and `/osint` require `X-API-Key` in production
+- **`INVESTIGATOR_API_KEY`** — `/analyze`, `/osint`, and `/report` require `X-API-Key` in production
 - **Token registry** — only pre-registered canary tokens are logged
 - **Rate limits** — per-IP caps at Caddy (see `deploy/DEPLOY.md`)
 - **Body size limits** — 1–2 MiB max on uploads and JSON payloads

@@ -24,6 +24,18 @@ class CanaryHitResponse(BaseModel):
     timestamp: datetime
 
 
+class StoredCanaryHit(BaseModel):
+    id: int
+    token: str
+    trap: str
+    client_ip: str
+    user_agent: str | None = None
+    referer: str | None = None
+    method: str = "GET"
+    headers: dict[str, str] = Field(default_factory=dict)
+    timestamp: datetime
+
+
 class CanaryTokenInfo(BaseModel):
     token: str
     embed_url: str

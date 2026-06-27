@@ -7,3 +7,4 @@ aiosqlite>=0.20.0
 dnspython>=2.7.0
 python-whois>=0.9.4
 python-multipart>=0.0.12
+pandas>=2.2.0

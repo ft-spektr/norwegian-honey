@@ -20,3 +20,9 @@ ngrok.yml
 
 *.json
 /*.eml
+
+# Generated investigation reports (visualize_report)
+*.html
+
+# Accidental shell/pip redirect files (e.g. =2.2.0 from unquoted pandas>=2.2.0)
+=*

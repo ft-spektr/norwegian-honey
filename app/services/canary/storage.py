@@ -10,7 +10,7 @@ from pathlib import Path
 import aiosqlite
 
 from app.config import Settings
-from app.models.canary import CanaryHitRecord, CanaryHitResponse
+from app.models.canary import CanaryHitRecord, CanaryHitResponse, StoredCanaryHit
 
 
 class CanaryStorage(ABC):
@@ -22,6 +22,15 @@ class CanaryStorage(ABC):
 
     @abstractmethod
     async def prune_old_hits(self, retention_days: int) -> int: ...
+
+    @abstractmethod
+    async def list_hits(
+        self,
+        *,
+        token: str | None = None,
+        trap: str | None = None,
+        limit: int = 500,
+    ) -> list[StoredCanaryHit]: ...
 
 
 class SQLiteCanaryStorage(CanaryStorage):
@@ -106,6 +115,59 @@ class SQLiteCanaryStorage(CanaryStorage):
             await db.commit()
             return cursor.rowcount or 0
 
+    async def list_hits(
+        self,
+        *,
+        token: str | None = None,
+        trap: str | None = None,
+        limit: int = 500,
+    ) -> list[StoredCanaryHit]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if token:
+            clauses.append("token = ?")
+            params.append(token)
+        if trap:
+            clauses.append("trap = ?")
+            params.append(trap)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = f"""
+            SELECT id, token, trap, client_ip, user_agent, referer, method, headers_json, timestamp
+            FROM canary_hits
+            {where}
+            ORDER BY timestamp ASC, id ASC
+            LIMIT ?
+        """
+        params.append(limit)
+
+        hits: list[StoredCanaryHit] = []
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+
+        for row in rows:
+            headers_raw = row[7] or "{}"
+            try:
+                headers = json.loads(headers_raw)
+            except json.JSONDecodeError:
+                headers = {}
+            ts = datetime.fromisoformat(str(row[8]).replace("Z", "+00:00"))
+            hits.append(
+                StoredCanaryHit(
+                    id=row[0],
+                    token=row[1],
+                    trap=row[2] or "images",
+                    client_ip=row[3],
+                    user_agent=row[4],
+                    referer=row[5],
+                    method=row[6] or "GET",
+                    headers=headers,
+                    timestamp=ts,
+                )
+            )
+        return hits
+
 
 class InfluxCanaryStorage(CanaryStorage):
     """
@@ -157,6 +219,15 @@ class InfluxCanaryStorage(CanaryStorage):
     async def prune_old_hits(self, retention_days: int) -> int:
         # Retention for Influx is configured at bucket level in production.
         return 0
+
+    async def list_hits(
+        self,
+        *,
+        token: str | None = None,
+        trap: str | None = None,
+        limit: int = 500,
+    ) -> list[StoredCanaryHit]:
+        raise NotImplementedError("list_hits is only supported for SQLite canary storage")
 
 
 def build_canary_storage(settings: Settings) -> CanaryStorage:

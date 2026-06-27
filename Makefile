@@ -68,12 +68,13 @@ SSH_CMD = ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
 .PHONY: help help-local help-ngrok install \
         health analyze-headers analyze-headers-sample analyze-eml \
         osint-query osint-query-sample osint-from-analysis osint-from-sample \
-        report-score report-from-analysis \
+        report-score report-from-analysis prod-canary-export \
         canary-token canary-hit canary-demo canary-logs canary-flush \
         local-dev local-docker-up local-docker-down local-docker-logs \
         local-health local-analyze-headers local-analyze-headers-sample local-analyze-eml \
         local-osint-query local-osint-query-sample local-osint-from-analysis local-osint-from-sample \
         local-report-score local-report-from-analysis local-cli-report \
+        local-canary-export local-visualize json-extract \
         local-canary-token local-canary-hit local-canary-demo \
         local-canary-logs local-canary-logs-local local-canary-logs-docker \
         local-canary-flush local-canary-flush-local local-canary-flush-docker \
@@ -178,7 +179,7 @@ osint-from-analysis: ## [prod] POST /osint/from-analysis (ANALYSIS=file.json)
 	curl -s -X POST "$(API_URL)/osint/from-analysis" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
-		-d "@$(ANALYSIS)" \
+		-d "$$($(PYTHON) -c "import json; from app.core.json_document import load_json_document; print(json.dumps(load_json_document('$(ANALYSIS)')))")" \
 		$(FORMAT)
 
 osint-from-sample: ## [prod] Analyze sample → OSINT pipeline
@@ -197,7 +198,7 @@ report-score: ## [prod] POST /report/score (ANALYSIS=file.json OSINT=osint.json 
 	curl -s -X POST "$(API_URL)/report/score" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
-		-d "$$($(PYTHON) -c "import json, pathlib; a=json.loads(pathlib.Path('$(ANALYSIS)').read_text()); o=pathlib.Path('$(OSINT)'); payload={'analysis': a, 'include_source': True}; payload['osint']=json.loads(o.read_text()) if '$(OSINT)' and o.is_file() else None; print(json.dumps(payload))")" \
+		-d "$$($(PYTHON) -c "import json, pathlib; from app.core.json_document import load_json_document; a=load_json_document('$(ANALYSIS)'); o=pathlib.Path('$(OSINT)'); payload={'analysis': a, 'include_source': True}; payload['osint']=load_json_document(o) if '$(OSINT)' and o.is_file() else None; print(json.dumps(payload))")" \
 		$(FORMAT)
 
 report-from-analysis: ## [prod] POST /report/from-analysis — analyze JSON → OSINT → score
@@ -205,7 +206,7 @@ report-from-analysis: ## [prod] POST /report/from-analysis — analyze JSON → 
 	curl -s -X POST "$(API_URL)/report/from-analysis" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
-		-d "@$(ANALYSIS)" \
+		-d "$$($(PYTHON) -c "import json; from app.core.json_document import load_json_document; print(json.dumps(load_json_document('$(ANALYSIS)')))")" \
 		$(FORMAT)
 
 canary-token: ## [prod] Generate canary embed + register on VPS (TRAP=pixel|portfolio|both)
@@ -256,6 +257,13 @@ canary-flush: prod-canary-flush ## [prod] Alias — flush canary DB on server
 prod-canary-flush: ## [prod] Flush canary SQLite on VPS (KEEP_TOKENS=1 to keep registered tokens)
 	$(SSH_CMD) "cd $(PROD_REMOTE_DIR) && docker compose exec -T $(DOCKER_SERVICE) \
 		python scripts/flush_canary_db.py --db-path $(DOCKER_CANARY_DB) $(CANARY_FLUSH_FLAGS)"
+
+prod-canary-export: ## [prod] Export canary investigation JSON (TOKEN= TRAP= OUT=investigation.json)
+	@test -n "$(OUT)" || (echo "Usage: make prod-canary-export OUT=investigation.json [TOKEN=] [TRAP=portfolio]"; exit 1)
+	$(SSH_CMD) "cd $(PROD_REMOTE_DIR) && docker compose exec -T $(DOCKER_SERVICE) \
+		python scripts/export_canary_investigation.py --db-path $(DOCKER_CANARY_DB) \
+		$(if $(TOKEN),--token '$(TOKEN)',) $(if $(TRAP),--trap $(TRAP),) --run-osint" > "$(OUT)"
+	@echo "Wrote $(OUT)"
 
 # =============================================================================
 # LOCAL DEV — run server on localhost
@@ -308,6 +316,26 @@ local-cli-report: ## CLI threat report (ANALYSIS= OUT=report.json, no server)
 	$(PYTHON) -m app.cli.threat_report "$(ANALYSIS)" \
 		$(if $(OSINT),--osint "$(OSINT)",) \
 		$(if $(OUT),-o "$(OUT)",)
+
+local-canary-export: ## Export canary investigation from local DB (TOKEN= TRAP= OUT=)
+	@test -n "$(OUT)" || (echo "Usage: make local-canary-export OUT=investigation.json [TOKEN=] [TRAP=]"; exit 1)
+	$(PYTHON) scripts/export_canary_investigation.py --db-path $(CANARY_DB) \
+		$(if $(TOKEN),--token "$(TOKEN)",) $(if $(TRAP),--trap $(TRAP),) \
+		$(if $(OSINT),--osint "$(OSINT)",--run-osint) \
+		$(if $(ANALYSIS),--analysis "$(ANALYSIS)",) \
+		$(if $(REPORT),--threat-report "$(REPORT)",) \
+		-o "$(OUT)"
+	@echo "Wrote $(OUT)"
+
+local-visualize: ## Pandas table view (REPORT=investigation.json [HTML=report.html] [TEXT=report.txt])
+	@test -n "$(REPORT)" || (echo "Usage: make local-visualize REPORT=investigation.json [HTML=out.html] [TEXT=out.txt]"; exit 1)
+	$(PYTHON) -m app.cli.visualize_report "$(REPORT)" \
+		$(if $(HTML),--html "$(HTML)",) \
+		$(if $(TEXT),--text "$(TEXT)",)
+
+json-extract: ## Strip curl noise from captured output (IN=file OUT=clean.json)
+	@test -n "$(IN)" || (echo "Usage: make json-extract IN=report2.json OUT=clean.json"; exit 1)
+	$(PYTHON) scripts/extract_json.py "$(IN)" $(if $(OUT),-o "$(OUT)",)
 
 local-canary-token: ## Generate + register canary token for localhost (TRAP=pixel|portfolio|both)
 	$(PYTHON) scripts/generate_canary_token.py --base-url "$(LOCAL_URL)" --count 1 \

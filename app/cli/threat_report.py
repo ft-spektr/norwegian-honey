@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from app.config import get_settings
+from app.core.json_document import load_json_document
 from app.models.analyze import HeaderAnalysisResponse
 from app.models.osint import OSINTQueryRequest, OSINTQueryResponse
 from app.services.osint.aggregator import aggregate_osint
@@ -21,11 +22,11 @@ async def _run(
     skip_osint: bool,
     include_source: bool,
 ) -> str:
-    analysis = HeaderAnalysisResponse.model_validate_json(analysis_path.read_text(encoding="utf-8"))
+    analysis = HeaderAnalysisResponse.model_validate(load_json_document(analysis_path))
     osint: OSINTQueryResponse | None = None
 
     if osint_path:
-        osint = OSINTQueryResponse.model_validate_json(osint_path.read_text(encoding="utf-8"))
+        osint = OSINTQueryResponse.model_validate(load_json_document(osint_path))
     elif not skip_osint:
         settings = get_settings()
         request = OSINTQueryRequest(
