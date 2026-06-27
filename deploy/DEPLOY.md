@@ -102,19 +102,25 @@ curl -s https://www736.your-server.de/health
 ## 6. Generate canary tokens (on server)
 
 ```bash
+# Hidden pixel (email img tag)
 docker compose exec api python scripts/generate_canary_token.py \
-  --base-url "https://www736.your-server.de" --count 1
+  --base-url "https://spek-tr.no" --trap pixel --count 1
+
+# Portfolio link (email hyperlink)
+docker compose exec api python scripts/generate_canary_token.py \
+  --base-url "https://spek-tr.no" --trap portfolio --count 1 \
+  --register-db /data/canary.db
 ```
 
 View hits:
 
 ```bash
-make canary-logs-docker
+make prod-canary-logs
 # or on server:
 docker compose exec -T api python -c "
 import sqlite3
 db=sqlite3.connect('/data/canary.db')
-for r in db.execute('SELECT id, token, client_ip, user_agent, timestamp FROM canary_hits ORDER BY id DESC LIMIT 10'):
+for r in db.execute('SELECT id, trap, token, client_ip, user_agent, timestamp FROM canary_hits ORDER BY id DESC LIMIT 10'):
     print(r)
 "
 ```
@@ -191,7 +197,7 @@ Per-client IP limits (per minute):
 | global | all | 120 req |
 | analyze | `/analyze/*` | 20 req |
 | osint | `/osint/*` | 30 req |
-| canary | `/images/*` | 60 req |
+| canary | `/images/*`, `/portfolio/*` | 60 req |
 
 Exceeded limits return **HTTP 429** with `Retry-After: 60`.
 

@@ -46,10 +46,10 @@
 			window 1m
 		}
 
-		# Canary pixels — allow mail-client retries, block floods
+		# Canary traps — allow mail-client retries, block floods
 		zone canary {
 			match {
-				path /images/*
+				path /images/* /portfolio/*
 			}
 			key {remote_host}
 			events 60

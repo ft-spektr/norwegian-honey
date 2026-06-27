@@ -14,6 +14,7 @@ class CanaryHitRecord(BaseModel):
     timestamp: datetime
     referer: str | None = None
     method: str = "GET"
+    trap: str = "images"  # images | portfolio
 
 
 class CanaryHitResponse(BaseModel):
@@ -27,3 +28,5 @@ class CanaryTokenInfo(BaseModel):
     token: str
     embed_url: str
     html_snippet: str
+    trap: str = "images"
+    link_url: str | None = None

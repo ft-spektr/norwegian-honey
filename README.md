@@ -16,7 +16,8 @@ A lightweight, self-hosted investigative toolkit for analyzing phishing and scam
 ┌─────────────┐     ┌──────────────────────────────────────┐
 │  /analyze   │────▶│  Header parsing + DNS auth checks  │
 │  /osint     │────▶│  Async OSINT APIs + TTL cache        │
-│  /images/*  │────▶│  Canary pixel → SQLite / InfluxDB    │
+│  /images/*      │────▶│  Canary traps → SQLite / InfluxDB    │
+│  /portfolio/*   │     │                                      │
 └─────────────┘     └──────────────────────────────────────┘
 ```
 
@@ -69,7 +70,8 @@ make prod-canary-logs                          # → SSH to VPS, read DB
 | `POST` | `/analyze/eml` | Upload `.eml` file |
 | `POST` | `/osint/query` | OSINT lookup for IPs, domains, emails |
 | `POST` | `/osint/from-analysis` | OSINT on entities from `/analyze` output |
-| `GET` | `/images/{token}.png` | Canary tracking pixel |
+| `GET` | `/images/{token}.png` | Hidden tracking pixel |
+| `GET` | `/portfolio/{token}` | Portfolio link trap (generic HTML page) |
 
 ## Makefile shortcuts
 

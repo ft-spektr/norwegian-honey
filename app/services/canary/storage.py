@@ -51,7 +51,16 @@ class SQLiteCanaryStorage(CanaryStorage):
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_canary_timestamp ON canary_hits(timestamp)"
             )
+            await self._migrate_schema(db)
             await db.commit()
+
+    async def _migrate_schema(self, db: aiosqlite.Connection) -> None:
+        cursor = await db.execute("PRAGMA table_info(canary_hits)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "trap" not in columns:
+            await db.execute(
+                "ALTER TABLE canary_hits ADD COLUMN trap TEXT NOT NULL DEFAULT 'images'"
+            )
 
     async def record_hit(self, hit: CanaryHitRecord) -> CanaryHitResponse:
         ts = hit.timestamp.astimezone(timezone.utc).isoformat()
@@ -59,8 +68,8 @@ class SQLiteCanaryStorage(CanaryStorage):
             cursor = await db.execute(
                 """
                 INSERT INTO canary_hits
-                    (token, client_ip, user_agent, referer, method, headers_json, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (token, client_ip, user_agent, referer, method, headers_json, timestamp, trap)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     hit.token,
@@ -70,6 +79,7 @@ class SQLiteCanaryStorage(CanaryStorage):
                     hit.method,
                     json.dumps(hit.headers),
                     ts,
+                    hit.trap,
                 ),
             )
             await db.commit()
@@ -118,9 +128,10 @@ class InfluxCanaryStorage(CanaryStorage):
         # Escape tag values for line protocol
         token = hit.token.replace(" ", "\\ ").replace(",", "\\,")
         client_ip = hit.client_ip.replace(" ", "\\ ")
+        trap = hit.trap.replace(" ", "\\ ").replace(",", "\\,")
 
         line = (
-            f"canary_hit,token={token},client_ip={client_ip} "
+            f"canary_hit,token={token},client_ip={client_ip},trap={trap} "
             f'user_agent="{hit.user_agent or ""}",referer="{hit.referer or ""}",'
             f'method="{hit.method}" {ts_ns}'
         )

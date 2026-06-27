@@ -35,6 +35,7 @@ UVICORN        ?= $(VENV)/bin/uvicorn
 EML            ?= fixtures/sample.eml
 CANARY_DB      ?= ./data/canary.db
 TOKEN          ?=
+TRAP           ?= pixel
 HOST           ?= 127.0.0.1
 LOCAL_PORT     ?= 8000
 DOCKER_SERVICE ?= api
@@ -186,8 +187,8 @@ osint-from-sample: ## [prod] Analyze sample → OSINT pipeline
 		-d @- \
 		$(FORMAT)
 
-canary-token: ## [prod] Generate canary embed + register on VPS
-	@OUT="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(API_URL)" --count 1 --json)"; \
+canary-token: ## [prod] Generate canary embed + register on VPS (TRAP=pixel|portfolio|both)
+	@OUT="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(API_URL)" --count 1 --trap $(TRAP) --json)"; \
 	echo "$$OUT" | $(PYTHON) -m json.tool; \
 	TOKEN="$$($(PYTHON) -c "import json,sys; print(json.loads(sys.argv[1])['token'])" "$$OUT")"; \
 	$(MAKE) prod-canary-register TOKEN="$$TOKEN"
@@ -201,20 +202,22 @@ prod-canary-register: ## [prod] Register TOKEN on VPS via SSH
 	$(SSH_CMD) "cd $(PROD_REMOTE_DIR) && docker compose exec -T $(DOCKER_SERVICE) \
 		python scripts/register_canary_token.py '$(TOKEN)' --db-path $(DOCKER_CANARY_DB)"
 
-canary-hit: ## [prod] Trigger pixel (TOKEN=required)
-	@test -n "$(TOKEN)" || (echo "Usage: make canary-hit TOKEN=your-token"; exit 1)
+canary-hit: ## [prod] Trigger trap (TOKEN= required, TRAP=pixel|portfolio)
+	@test -n "$(TOKEN)" || (echo "Usage: make canary-hit TOKEN=your-token [TRAP=pixel|portfolio]"; exit 1)
+	@if [ "$(TRAP)" = "portfolio" ]; then \
+		URL="$(API_URL)/portfolio/$(TOKEN)"; \
+	else \
+		URL="$(API_URL)/images/$(TOKEN).png"; \
+	fi; \
 	curl -s -H "User-Agent: Makefile-Test/1.0" \
-		"$(API_URL)/images/$(TOKEN).png" \
-		-o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"
+		"$$URL" -o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"
 
-canary-demo: ## [prod] Generate token, register on VPS, hit pixel on cloud
-	@TOKEN="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(API_URL)" --count 1 --json \
+canary-demo: ## [prod] Generate token, register on VPS, hit trap on cloud (TRAP=pixel|portfolio)
+	@TOKEN="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(API_URL)" --count 1 --trap $(TRAP) --json \
 		| $(PYTHON) -c "import sys,json; print(json.load(sys.stdin)['token'])")"; \
-	echo "token: $$TOKEN"; \
+	echo "token: $$TOKEN  trap: $(TRAP)"; \
 	$(MAKE) prod-canary-register TOKEN="$$TOKEN"; \
-	curl -s -H "User-Agent: Makefile-Test/1.0" \
-		"$(API_URL)/images/$$TOKEN.png" \
-		-o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"; \
+	$(MAKE) canary-hit TOKEN="$$TOKEN" TRAP=$(TRAP); \
 	echo "Check logs: make prod-canary-logs"
 
 canary-logs: prod-canary-logs ## [prod] Alias — canary hits on server
@@ -223,8 +226,8 @@ prod-canary-logs: ## [prod] Canary hits via SSH on VPS
 	$(SSH_CMD) "cd $(PROD_REMOTE_DIR) && docker compose exec -T $(DOCKER_SERVICE) python -c \"\
 import sqlite3; \
 db=sqlite3.connect('$(DOCKER_CANARY_DB)'); \
-rows=db.execute('SELECT id, token, client_ip, user_agent, timestamp FROM canary_hits ORDER BY id DESC LIMIT 10').fetchall(); \
-print('id|token|client_ip|user_agent|timestamp'); \
+rows=db.execute('SELECT id, trap, token, client_ip, user_agent, timestamp FROM canary_hits ORDER BY id DESC LIMIT 10').fetchall(); \
+print('id|trap|token|client_ip|user_agent|timestamp'); \
 [print('|'.join(str(c) if c is not None else '' for c in r)) for r in rows] or print('(no hits)')\""
 
 # =============================================================================
@@ -267,28 +270,30 @@ local-osint-from-analysis: ## POST /osint/from-analysis on localhost
 local-osint-from-sample: ## Analyze → OSINT on localhost
 	$(MAKE) osint-from-sample API_URL=$(LOCAL_URL)
 
-local-canary-token: ## Generate + register canary token for localhost
+local-canary-token: ## Generate + register canary token for localhost (TRAP=pixel|portfolio|both)
 	$(PYTHON) scripts/generate_canary_token.py --base-url "$(LOCAL_URL)" --count 1 \
-		--register-db $(CANARY_DB)
+		--trap $(TRAP) --register-db $(CANARY_DB)
 
 local-canary-register: ## Register TOKEN in local DB
 	@test -n "$(TOKEN)" || (echo "Usage: make local-canary-register TOKEN=your-token"; exit 1)
 	$(PYTHON) scripts/register_canary_token.py "$(TOKEN)" --db-path $(CANARY_DB)
 
-local-canary-hit: ## Trigger pixel on localhost (TOKEN=)
-	@test -n "$(TOKEN)" || (echo "Usage: make local-canary-hit TOKEN=your-token"; exit 1)
+local-canary-hit: ## Trigger trap on localhost (TOKEN=, TRAP=pixel|portfolio)
+	@test -n "$(TOKEN)" || (echo "Usage: make local-canary-hit TOKEN=your-token [TRAP=pixel|portfolio]"; exit 1)
+	@if [ "$(TRAP)" = "portfolio" ]; then \
+		URL="$(LOCAL_URL)/portfolio/$(TOKEN)"; \
+	else \
+		URL="$(LOCAL_URL)/images/$(TOKEN).png"; \
+	fi; \
 	curl -s -H "User-Agent: Makefile-Test/1.0" \
-		"$(LOCAL_URL)/images/$(TOKEN).png" \
-		-o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"
+		"$$URL" -o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"
 
-local-canary-demo: ## Generate token, register, hit pixel locally, show DB
-	@TOKEN="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(LOCAL_URL)" --count 1 --json \
+local-canary-demo: ## Generate token, register, hit trap locally, show DB (TRAP=pixel|portfolio)
+	@TOKEN="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(LOCAL_URL)" --count 1 --trap $(TRAP) --json \
 		| $(PYTHON) -c "import sys,json; print(json.load(sys.stdin)['token'])")"; \
-	echo "token: $$TOKEN"; \
+	echo "token: $$TOKEN  trap: $(TRAP)"; \
 	$(MAKE) local-canary-register TOKEN="$$TOKEN"; \
-	curl -s -H "User-Agent: Makefile-Test/1.0" \
-		"$(LOCAL_URL)/images/$$TOKEN.png" \
-		-o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"; \
+	$(MAKE) local-canary-hit TOKEN="$$TOKEN" TRAP=$(TRAP); \
 	$(MAKE) local-canary-logs
 
 local-canary-logs: ## Canary hits — local docker if running, else local SQLite
@@ -302,16 +307,16 @@ local-canary-logs-local: ## Canary hits from ./data/canary.db
 	@$(PYTHON) -c "import sqlite3, pathlib; \
 db=pathlib.Path('$(CANARY_DB)'); print(f'DB: {db.resolve()}'); \
 conn=sqlite3.connect(db); \
-rows=conn.execute('SELECT id, token, client_ip, user_agent, timestamp FROM canary_hits ORDER BY id DESC LIMIT 10').fetchall(); \
-print('id|token|client_ip|user_agent|timestamp'); \
+rows=conn.execute('SELECT id, trap, token, client_ip, user_agent, timestamp FROM canary_hits ORDER BY id DESC LIMIT 10').fetchall(); \
+print('id|trap|token|client_ip|user_agent|timestamp'); \
 [print('|'.join(str(c) if c is not None else '' for c in r)) for r in rows] if rows else print('(no hits)')"
 
 local-canary-logs-docker: ## Canary hits from local Docker volume
 	docker compose exec -T $(DOCKER_SERVICE) python -c "\
 import sqlite3; \
 db=sqlite3.connect('$(DOCKER_CANARY_DB)'); \
-rows=db.execute('SELECT id, token, client_ip, user_agent, timestamp FROM canary_hits ORDER BY id DESC LIMIT 10').fetchall(); \
-print('id|token|client_ip|user_agent|timestamp'); \
+rows=db.execute('SELECT id, trap, token, client_ip, user_agent, timestamp FROM canary_hits ORDER BY id DESC LIMIT 10').fetchall(); \
+print('id|trap|token|client_ip|user_agent|timestamp'); \
 [print('|'.join(str(c) if c is not None else '' for c in r)) for r in rows] or print('(no hits)')"
 
 local-cli-eml: ## Analyze .eml offline (no server)
