@@ -12,7 +12,7 @@ from app import __version__
 from app.config import get_settings
 from app.core.cache import osint_cache
 from app.core.middleware import MaxBodySizeMiddleware
-from app.routers import analyze, canary, osint
+from app.routers import analyze, canary, osint, report
 from app.routers.canary import set_canary_storage, set_token_registry
 from app.services.canary.storage import build_canary_storage
 from app.services.canary.tokens import CanaryTokenRegistry
@@ -74,6 +74,7 @@ def create_app() -> FastAPI:
 
     app.include_router(analyze.router)
     app.include_router(osint.router)
+    app.include_router(report.router)
     app.include_router(canary.router)
 
     @app.get("/health")

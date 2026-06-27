@@ -68,10 +68,12 @@ SSH_CMD = ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
 .PHONY: help help-local help-ngrok install \
         health analyze-headers analyze-headers-sample analyze-eml \
         osint-query osint-query-sample osint-from-analysis osint-from-sample \
+        report-score report-from-analysis \
         canary-token canary-hit canary-demo canary-logs canary-flush \
         local-dev local-docker-up local-docker-down local-docker-logs \
         local-health local-analyze-headers local-analyze-headers-sample local-analyze-eml \
         local-osint-query local-osint-query-sample local-osint-from-analysis local-osint-from-sample \
+        local-report-score local-report-from-analysis local-cli-report \
         local-canary-token local-canary-hit local-canary-demo \
         local-canary-logs local-canary-logs-local local-canary-logs-docker \
         local-canary-flush local-canary-flush-local local-canary-flush-docker \
@@ -190,6 +192,22 @@ osint-from-sample: ## [prod] Analyze sample → OSINT pipeline
 		-d @- \
 		$(FORMAT)
 
+report-score: ## [prod] POST /report/score (ANALYSIS=file.json OSINT=osint.json optional)
+	@test -n "$(ANALYSIS)" || (echo "Usage: make report-score ANALYSIS=analysis.json [OSINT=osint.json]"; exit 1)
+	curl -s -X POST "$(API_URL)/report/score" \
+		$(API_AUTH) \
+		-H "Content-Type: application/json" \
+		-d "$$($(PYTHON) -c "import json, pathlib; a=json.loads(pathlib.Path('$(ANALYSIS)').read_text()); o=pathlib.Path('$(OSINT)'); payload={'analysis': a, 'include_source': True}; payload['osint']=json.loads(o.read_text()) if '$(OSINT)' and o.is_file() else None; print(json.dumps(payload))")" \
+		$(FORMAT)
+
+report-from-analysis: ## [prod] POST /report/from-analysis — analyze JSON → OSINT → score
+	@test -n "$(ANALYSIS)" || (echo "Usage: make report-from-analysis ANALYSIS=analysis.json"; exit 1)
+	curl -s -X POST "$(API_URL)/report/from-analysis" \
+		$(API_AUTH) \
+		-H "Content-Type: application/json" \
+		-d "@$(ANALYSIS)" \
+		$(FORMAT)
+
 canary-token: ## [prod] Generate canary embed + register on VPS (TRAP=pixel|portfolio|both)
 	@OUT="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(API_URL)" --count 1 --trap $(TRAP) --json)"; \
 	echo "$$OUT" | $(PYTHON) -m json.tool; \
@@ -278,6 +296,18 @@ local-osint-from-analysis: ## POST /osint/from-analysis on localhost
 
 local-osint-from-sample: ## Analyze → OSINT on localhost
 	$(MAKE) osint-from-sample API_URL=$(LOCAL_URL)
+
+local-report-score: ## POST /report/score on localhost
+	$(MAKE) report-score API_URL=$(LOCAL_URL) ANALYSIS="$(ANALYSIS)" OSINT="$(OSINT)"
+
+local-report-from-analysis: ## POST /report/from-analysis on localhost
+	$(MAKE) report-from-analysis API_URL=$(LOCAL_URL) ANALYSIS="$(ANALYSIS)"
+
+local-cli-report: ## CLI threat report (ANALYSIS= OUT=report.json, no server)
+	@test -n "$(ANALYSIS)" || (echo "Usage: make local-cli-report ANALYSIS=analysis.json [OUT=report.json]"; exit 1)
+	$(PYTHON) -m app.cli.threat_report "$(ANALYSIS)" \
+		$(if $(OSINT),--osint "$(OSINT)",) \
+		$(if $(OUT),-o "$(OUT)",)
 
 local-canary-token: ## Generate + register canary token for localhost (TRAP=pixel|portfolio|both)
 	$(PYTHON) scripts/generate_canary_token.py --base-url "$(LOCAL_URL)" --count 1 \
