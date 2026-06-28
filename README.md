@@ -131,11 +131,11 @@ Produces a **0–100 overall score** with verdict (`low` / `moderate` / `high` /
 | **headers** | 30% | Anomalies from header analysis (weighted down for recipient MX noise) |
 | **authentication** | 15% | SPF/DKIM/DMARC pass/fail from headers |
 | **infrastructure** | 15% | AbuseIPDB, ipinfo, WHOIS on sender-relevant entities only |
-| **canary** | engagement bonus | When `INVESTIGATION=` is provided — trap hits add an engagement uplift (human + cloud pattern scores highest) |
+| **canary** | pattern bonus | When `INVESTIGATION=` is provided — scores suspicious hit patterns (human + cloud follow-up, multi-country), not trap hits alone |
 
 Verdict bands: **low** &lt;30 · **moderate** 30–54 · **high** 55–74 · **critical** ≥75.
 
-Each report includes an **`action_plan`** with prioritized steps (`immediate` / `recommended` / `optional`) tailored to the verdict and findings (including canary engagement when present).
+Each report includes an **`action_plan`** with prioritized steps (`immediate` / `recommended` / `optional`) tailored to the verdict and findings (including suspicious canary patterns when present).
 
 ```bash
 # Full pipeline — report endpoint runs OSINT internally and embeds it in the JSON

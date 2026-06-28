@@ -497,23 +497,32 @@ def _canary_profile_countries(investigation: CanaryInvestigationReport) -> set[s
 
 
 def _canary_engagement_bonus(investigation: CanaryInvestigationReport | None) -> int:
-    """Direct uplift when a trap confirms active adversary engagement."""
+    """Uplift from suspicious canary hit patterns — not from a trap hit alone."""
     if investigation is None or investigation.hit_count == 0:
         return 0
 
     roles = {profile.role for profile in investigation.ip_profiles}
     countries = _canary_profile_countries(investigation)
+    bonus = 0
 
-    bonus = 12  # trap fired — link was opened outside your mail client
-
-    if "human_likely" in roles:
-        bonus += 8
-    if "automation_likely" in roles:
-        bonus += 10
     if "human_likely" in roles and "automation_likely" in roles:
-        bonus += 20  # manual click then cloud/backend fetch
-    if len(countries) >= 2:
-        bonus += 6
+        bonus += 26  # manual click then cloud/backend fetch
+        if len(countries) >= 2:
+            bonus += 6
+    elif "automation_likely" in roles:
+        bonus += 8  # cloud/scanner only — weak signal
+
+    for profile in investigation.ip_profiles:
+        if profile.role != "automation_likely":
+            continue
+        abuse = profile.osint.get("abuseipdb") or {}
+        score = abuse.get("abuseConfidenceScore")
+        if isinstance(score, (int, float)) and score >= 25:
+            bonus += 6
+        else:
+            total_reports = abuse.get("totalReports")
+            if isinstance(total_reports, int) and total_reports > 0:
+                bonus += 4
 
     return min(32, bonus)
 
@@ -526,11 +535,12 @@ def _canary_findings(investigation: CanaryInvestigationReport | None) -> list[Sc
         ScoreFinding(
             category="canary",
             code="canary_trap_triggered",
-            severity="high",
-            points=35,
+            severity="info",
+            points=0,
             message=(
-                f"Canary trap triggered: {investigation.hit_count} hit(s) from "
-                f"{investigation.unique_ip_count} unique IP(s)."
+                f"Canary trap recorded {investigation.hit_count} hit(s) from "
+                f"{investigation.unique_ip_count} unique IP(s) — any recipient who opens "
+                "the link will trigger this; score reflects hit patterns, not the hit itself."
             ),
             evidence={
                 "hit_count": investigation.hit_count,
@@ -583,9 +593,12 @@ def _canary_findings(investigation: CanaryInvestigationReport | None) -> list[Sc
                 ScoreFinding(
                     category="canary",
                     code="canary_human_operator_likely",
-                    severity="high",
-                    points=28,
-                    message=f"Canary opened from consumer/mobile IP {profile.ip} (human-likely).",
+                    severity="info",
+                    points=0,
+                    message=(
+                        f"Consumer/mobile IP {profile.ip} opened the trap — consistent with "
+                        "any person clicking the link, not a threat signal on its own."
+                    ),
                     evidence={"ip": profile.ip, "role": profile.role, "hit_count": profile.hit_count},
                 )
             )
@@ -594,9 +607,9 @@ def _canary_findings(investigation: CanaryInvestigationReport | None) -> list[Sc
                 ScoreFinding(
                     category="canary",
                     code="canary_automation_followup",
-                    severity="high",
-                    points=24,
-                    message=f"Canary followed by cloud/automation IP {profile.ip}.",
+                    severity="medium",
+                    points=12,
+                    message=f"Cloud/automation IP {profile.ip} fetched the trap after the link was opened.",
                     evidence={"ip": profile.ip, "role": profile.role, "hit_count": profile.hit_count},
                 )
             )
@@ -633,11 +646,12 @@ def _canary_findings(investigation: CanaryInvestigationReport | None) -> list[Sc
         findings.append(
             ScoreFinding(
                 category="canary",
-                code="canary_adversary_engagement_confirmed",
+                code="canary_suspicious_hit_pattern",
                 severity="critical" if engagement_bonus >= 28 else "high",
                 points=engagement_bonus,
                 message=(
-                    f"Confirmed adversary engagement on canary trap (+{engagement_bonus} to overall score)."
+                    f"Suspicious canary hit pattern (+{engagement_bonus} to overall score; "
+                    "trap hits alone are not scored)."
                 ),
                 evidence={
                     "engagement_bonus": engagement_bonus,

@@ -124,13 +124,20 @@ def _finding_codes(findings: list[ScoreFinding]) -> set[str]:
     return {finding.code for finding in findings}
 
 
-def _has_canary_engagement(
-    findings: list[ScoreFinding],
-    investigation: CanaryInvestigationReport | None,
-) -> bool:
-    if investigation is not None and investigation.hit_count > 0:
-        return True
-    return "canary_adversary_engagement_confirmed" in _finding_codes(findings)
+def _has_suspicious_canary_pattern(findings: list[ScoreFinding]) -> bool:
+    codes = _finding_codes(findings)
+    return bool(
+        codes
+        & {
+            "canary_suspicious_hit_pattern",
+            "canary_human_then_automation",
+            "canary_multi_country_ops",
+        }
+    )
+
+
+def _has_canary_hits(investigation: CanaryInvestigationReport | None) -> bool:
+    return investigation is not None and investigation.hit_count > 0
 
 
 def _canary_roles(investigation: CanaryInvestigationReport | None) -> set[str]:
@@ -189,21 +196,14 @@ def build_action_plan(
             "Mismatched routing domains are a common phishing technique.",
         )
 
-    if _has_canary_engagement(findings, investigation):
+    if _has_suspicious_canary_pattern(findings):
         roles = _canary_roles(investigation)
         _append(
             items,
             seen,
             "immediate",
-            "Canary trap confirms the sender (or their infrastructure) opened your link — treat as an active adversary.",
-            "Engagement is independent proof beyond header analysis.",
-        )
-        _append(
-            items,
-            seen,
-            "immediate",
-            "Do not engage further with this sender; do not send additional links or personal data.",
-            "Continued contact may expose more attack surface.",
+            "Canary hit pattern suggests organized scam infrastructure — do not engage further or send personal data.",
+            "Human consumer IP followed by cloud/automation is not typical of a lone legitimate recruiter.",
         )
         _append(
             items,
@@ -225,9 +225,17 @@ def build_action_plan(
                 items,
                 seen,
                 "optional",
-                "Single cloud/automation hit may be a link scanner only — still treat the email as untrusted.",
+                "Single cloud/automation hit may be a mail link scanner — still treat the email as untrusted.",
                 "Lower confidence of a live human operator on the other end.",
             )
+    elif _has_canary_hits(investigation):
+        _append(
+            items,
+            seen,
+            "optional",
+            "Canary recorded that the link was opened — this alone does not prove malice; review hit patterns in investigation.json.",
+            "Any recipient who clicks the trap will generate a hit.",
+        )
 
     if verdict in {"critical", "high"} and overall_score >= 55:
         _append(
@@ -239,8 +247,8 @@ def build_action_plan(
         )
 
     headline = _VERDICT_HEADLINES.get(verdict, _VERDICT_HEADLINES["low"])
-    if _has_canary_engagement(findings, investigation) and verdict in {"high", "critical"}:
-        headline = f"{headline} Canary trap confirms active engagement."
+    if _has_suspicious_canary_pattern(findings) and verdict in {"high", "critical"}:
+        headline = f"{headline} Canary hit pattern supports active scam infrastructure."
 
     items.sort(key=lambda item: (_PRIORITY_RANK[item.priority], item.action))
     return ThreatActionPlan(headline=headline, actions=items)
