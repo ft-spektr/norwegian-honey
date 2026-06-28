@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +13,38 @@ from app.core.json_document import load_json_document
 pd.set_option("display.max_colwidth", 72)
 pd.set_option("display.width", 120)
 
+# Columns that tend to contain long prose — wrap in HTML/terminal output.
+_WRAP_COLUMNS = frozenset(
+    {
+        "summary",
+        "message",
+        "notes",
+        "user_agent",
+        "from",
+        "subject",
+        "hostname",
+        "org",
+        "raw",
+        "referer",
+    }
+)
 
-def _short_ua(ua: str | None, limit: int = 48) -> str:
-    if not ua:
-        return ""
-    return ua if len(ua) <= limit else ua[: limit - 1] + "…"
+_TERMINAL_WRAP_WIDTH = 72
+
+_HTML_STYLES = """
+body{font-family:system-ui,sans-serif;margin:2rem;background:#f6f7f9;color:#1f2933}
+h1{font-size:1.4rem} h2{font-size:1rem;margin-top:2rem;color:#52606d}
+.meta{color:#627d98;margin-bottom:1.5rem}
+.table-wrap{overflow-x:auto;margin:.5rem 0 1.5rem}
+table.report-table{border-collapse:collapse;width:100%;min-width:640px;background:#fff;
+border:1px solid #d9e2ec;font-size:.88rem;table-layout:fixed}
+table.report-table th,table.report-table td{
+padding:.55rem .65rem;border-bottom:1px solid #e4e7eb;text-align:left;vertical-align:top;
+white-space:normal;word-break:break-word;overflow-wrap:anywhere;hyphens:auto;max-width:0}
+table.report-table th{background:#f0f4f8;font-size:.75rem;text-transform:uppercase;
+letter-spacing:.04em;font-weight:600}
+table.report-table tr:nth-child(even){background:#fafbfc}
+"""
 
 
 def _ipinfo_fields(osint: dict[str, Any]) -> dict[str, str]:
@@ -61,7 +89,7 @@ def investigation_tables(data: dict[str, Any]) -> dict[str, pd.DataFrame]:
                 "timestamp": hit.get("timestamp"),
                 "ip": hit.get("client_ip"),
                 "trap": hit.get("trap"),
-                "user_agent": _short_ua(hit.get("user_agent"), 56),
+                "user_agent": hit.get("user_agent") or "",
             }
         )
     tables["timeline"] = pd.DataFrame(timeline_rows)
@@ -81,10 +109,7 @@ def investigation_tables(data: dict[str, Any]) -> dict[str, pd.DataFrame]:
                 "org": geo["org"],
                 "hostname": geo["hostname"],
                 "abuse_%": geo["abuse_score"],
-                "user_agent": _short_ua(
-                    (profile.get("user_agents") or [""])[0],
-                    40,
-                ),
+                "user_agent": (profile.get("user_agents") or [""])[0],
                 "notes": "; ".join(profile.get("notes") or []),
             }
         )
@@ -259,6 +284,27 @@ def load_tables(path: Path) -> tuple[str, dict[str, pd.DataFrame]]:
     raise ValueError(f"Unrecognized report format: {path}")
 
 
+def _wrap_cell_text(value: Any, width: int = _TERMINAL_WRAP_WIDTH) -> str:
+    text = "" if value is None or (isinstance(value, float) and pd.isna(value)) else str(value)
+    if not text or text == "nan":
+        return ""
+    if len(text) <= width:
+        return text
+    return "\n".join(textwrap.wrap(text, width=width, break_long_words=False, break_on_hyphens=False))
+
+
+def _wrap_dataframe_for_terminal(df: pd.DataFrame) -> pd.DataFrame:
+    wrapped = df.copy()
+    for col in wrapped.columns:
+        if col in _WRAP_COLUMNS or wrapped[col].astype(str).str.len().max() > _TERMINAL_WRAP_WIDTH:
+            wrapped[col] = wrapped[col].map(_wrap_cell_text)
+    return wrapped
+
+
+def _dataframe_to_html(df: pd.DataFrame) -> str:
+    return df.to_html(index=False, escape=True, border=0, classes="report-table")
+
+
 def render_text(report_type: str, tables: dict[str, pd.DataFrame]) -> str:
     titles = {
         "overview": "CANARY INVESTIGATION",
@@ -280,7 +326,7 @@ def render_text(report_type: str, tables: dict[str, pd.DataFrame]) -> str:
         title = titles.get(key, key.replace("_", " ").title())
         lines.append(title)
         lines.append("-" * len(title))
-        lines.append(df.to_string(index=False))
+        lines.append(_wrap_dataframe_for_terminal(df).to_string(index=False))
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -290,16 +336,8 @@ def render_html(report_type: str, tables: dict[str, pd.DataFrame], title: str) -
         "<!DOCTYPE html>",
         "<html lang='en'><head><meta charset='utf-8'>",
         f"<title>{title}</title>",
-        "<style>",
-        "body{font-family:system-ui,sans-serif;margin:2rem;background:#f6f7f9;color:#1f2933}",
-        "h1{font-size:1.4rem} h2{font-size:1rem;margin-top:2rem;color:#52606d}",
-        "table{border-collapse:collapse;width:100%;background:#fff;margin:.5rem 0 1.5rem",
-        "border:1px solid #d9e2ec;font-size:.88rem}",
-        "th,td{padding:.5rem .65rem;border-bottom:1px solid #e4e7eb;text-align:left;vertical-align:top}",
-        "th{background:#f0f4f8;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}",
-        "tr:nth-child(even){background:#fafbfc}",
-        ".meta{color:#627d98;margin-bottom:1.5rem}",
-        "</style></head><body>",
+        f"<style>{_HTML_STYLES}</style>",
+        "</head><body>",
         f"<h1>{title}</h1>",
         f"<p class='meta'>Report type: {report_type}</p>",
     ]
@@ -320,6 +358,8 @@ def render_html(report_type: str, tables: dict[str, pd.DataFrame], title: str) -
         if df.empty:
             continue
         parts.append(f"<h2>{titles.get(key, key)}</h2>")
-        parts.append(df.to_html(index=False, escape=True, border=0))
+        parts.append('<div class="table-wrap">')
+        parts.append(_dataframe_to_html(df))
+        parts.append("</div>")
     parts.append("</body></html>")
     return "\n".join(parts)

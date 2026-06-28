@@ -19,7 +19,7 @@ ngrok.local.yml
 ngrok.yml
 
 *.json
-/*.eml
+*.eml*
 
 # Generated investigation reports (visualize_report)
 *.html

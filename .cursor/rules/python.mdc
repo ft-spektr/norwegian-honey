@@ -1,0 +1,16 @@
+---
+description: Python/FastAPI patterns for Norwegian Honey app code
+globs: app/**/*.py,scripts/**/*.py
+alwaysApply: false
+---
+
+# Python conventions
+
+- FastAPI routers stay thin; business logic in `app/services/`
+- Pydantic models in `app/models/` for all request/response shapes
+- Settings via `app/config.py` / pydantic-settings — never read env ad hoc in services
+- Async HTTP for OSINT clients; sync OK for header parsing and CLI
+- Canary storage: `app/services/canary/storage.py`; validate tokens before logging hits
+- Protected routes: use existing API key dependency — don't bypass in production paths
+- Errors exposed to clients must be sanitized; details in server logs only
+- New CLI modules under `app/cli/`; wire scripts in `scripts/` for Make/deploy use

@@ -1,10 +1,16 @@
 # Norwegian Honey — Makefile
-# Usage: make help | make help-local | make help-ngrok
+# Usage: make help | make help-local | make help-server | make help-ngrok
 #
-# Default targets call PRODUCTION (set DOMAIN in make.env).
-# Local dev and ngrok targets are prefixed local-* / ngrok-*.
+# Naming:
+#   prod-*   → production API at $(PROD_URL) or VPS via SSH
+#   local-*  → localhost API, local Docker/SQLite, or offline CLI
+#   server   → run ON the VPS (prod-up, prod-deploy, …)
+#   ngrok-*  → local dev with public tunnel
+#
+# Unprefixed names (analyze-eml, canary-token, …) are backward-compatible aliases for prod-*.
 
-.DEFAULT_GOAL := help
+HELP_FILE      := $(firstword $(MAKEFILE_LIST))
+.DEFAULT_GOAL  := help
 
 # --- Client config (production URL, SSH for remote logs) ---
 -include make.env
@@ -14,6 +20,7 @@ DOMAIN         ?= canary.example.com
 PROD_URL       ?= https://$(DOMAIN)
 LOCAL_URL      ?= http://127.0.0.1:8000
 API_URL        ?= $(PROD_URL)
+PROD_API_URL   = $(if $(filter command line,$(origin API_URL)),$(API_URL),$(PROD_URL))
 INVESTIGATOR_API_KEY ?=
 
 # curl auth header for protected /analyze and /osint endpoints
@@ -67,21 +74,24 @@ CANARY_FLUSH_FLAGS = $(if $(KEEP_TOKENS),--keep-tokens,)
 SSH_CMD = ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
 	-i $(PROD_SSH_KEY) -p $(PROD_SSH_PORT) $(PROD_SSH)
 
-.PHONY: help help-local help-ngrok install \
+.PHONY: help help-local help-ngrok help-server install \
+        prod-health prod-analyze-headers prod-analyze-headers-sample prod-analyze-eml \
+        prod-osint-query prod-osint-query-sample prod-osint-from-analysis prod-osint-from-sample \
+        prod-report-score prod-report-from-analysis prod-canary-token prod-canary-hit prod-canary-demo \
+        prod-canary-logs prod-canary-flush prod-canary-export prod-canary-register \
         health analyze-headers analyze-headers-sample analyze-eml \
         osint-query osint-query-sample osint-from-analysis osint-from-sample \
-        report-score report-from-analysis prod-canary-export \
-        canary-token canary-hit canary-demo canary-logs canary-flush \
+        report-score report-from-analysis canary-token canary-hit canary-demo canary-logs canary-flush \
         local-dev local-docker-up local-docker-down local-docker-logs \
         local-health local-analyze-headers local-analyze-headers-sample local-analyze-eml \
         local-osint-query local-osint-query-sample local-osint-from-analysis local-osint-from-sample \
         local-report-score local-report-from-analysis local-cli-report \
         local-canary-export local-visualize json-extract \
-        local-canary-token local-canary-hit local-canary-demo \
+        local-canary-token local-canary-hit local-canary-demo local-canary-register \
         local-canary-logs local-canary-logs-local local-canary-logs-docker \
         local-canary-flush local-canary-flush-local local-canary-flush-docker \
         local-cli-eml local-cli-headers local-docs \
-        prod-canary-logs prod-canary-flush prod-deploy prod-up prod-down prod-logs \
+        prod-deploy prod-up prod-down prod-logs \
         ngrok-install ngrok-setup ngrok-check ngrok-tunnel ngrok-tunnel-ephemeral ngrok-url \
         ngrok-health ngrok-canary-token
 
@@ -89,36 +99,47 @@ SSH_CMD = ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
 # HELP
 # =============================================================================
 
-help: ## Production API (default) — targets cloud at $(PROD_URL)
-	@echo "Norwegian Honey — production targets  →  $(PROD_URL)"
-	@echo "Config: make.env (copy from make.env.example)"
-	@echo "Override: make health PROD_URL=https://other.domain"
-	@echo "PRETTY=1  pretty-print JSON"
+help: ## Show production targets (prod-* and aliases)
+	@echo "Norwegian Honey"
 	@echo ""
-	@grep -E '^[a-zA-Z0-9_-]+:.*## \[prod\]' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*## \\[prod\\] "}; {printf "  \033[36m%-28s\033[0m %s\n", $$1, $$2}'
+	@echo "Environments (use explicit prefix to avoid mistakes):"
+	@echo "  \033[36mprod-*\033[0m    → $(PROD_URL) API  or  SSH to $(PROD_SSH)"
+	@echo "  \033[33mlocal-*\033[0m  → $(LOCAL_URL), ./data/canary.db, offline CLI  (make help-local)"
+	@echo "  \033[32mprod-up\033[0m etc → on VPS only  (make help-server)"
 	@echo ""
-	@echo "Other: make help-local | make help-ngrok | make help-server"
+	@echo "Config: make.env + .env   |   PRETTY=1 for JSON formatting"
+	@echo "Override API host: make prod-analyze-eml API_URL=https://other.domain"
+	@echo ""
+	@echo "Production API & remote canary (prod-*):"
+	@grep -hE '^prod-[a-zA-Z0-9_-]+:.*## \[prod\]' $(HELP_FILE) | \
+		awk 'BEGIN {FS = ":.*## \\[prod\\] "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Aliases (same as prod-*):"
+	@grep -hE '^[a-z][a-z0-9_-]*: prod-' $(HELP_FILE) | \
+		awk 'BEGIN {FS = ": prod-"}; {sub(/ ##.*/, "", $$2); printf "  %-30s → prod-%s\n", $$1, $$2}'
+	@echo ""
+	@echo "More: make help-local | make help-server | make help-ngrok"
 
 help-local: ## Local dev targets — localhost:$(LOCAL_PORT)
-	@echo "Local dev  →  $(LOCAL_URL)"
+	@echo "Local dev  →  $(LOCAL_URL)  |  offline CLI  |  ./data/canary.db"
 	@echo ""
-	@grep -E '^local-[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) | \
-		sed 's/^local-//' | \
-		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[33m%-28s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^local-[a-zA-Z0-9_-]+:.*##' $(HELP_FILE) | \
+		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[33m%-30s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@grep -hE '^(install|json-extract|domain-ip):.*##' $(HELP_FILE) | \
+		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[33m%-30s\033[0m %s\n", $$1, $$2}'
 
 help-ngrok: ## ngrok tunnel targets (local dev + public URL)
 	@echo "ngrok  →  $(NGROK_URL)"
 	@echo ""
-	@grep -E '^ngrok-[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) | \
-		sed 's/^ngrok-//' | \
-		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[35m%-28s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^ngrok-[a-zA-Z0-9_-]+:.*##' $(HELP_FILE) | \
+		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[35m%-30s\033[0m %s\n", $$1, $$2}'
 
 help-server: ## Server-side deploy targets (run on VPS)
-	@echo "Server deploy (on VPS)"
+	@echo "Run these ON the VPS ($(PROD_REMOTE_DIR)):"
 	@echo ""
-	@grep -E '^prod-(up|down|logs|deploy):.*##' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[32m%-28s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^prod-(up|down|logs|deploy):.*##' $(HELP_FILE) | \
+		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[32m%-30s\033[0m %s\n", $$1, $$2}'
 
 # =============================================================================
 # SETUP
@@ -132,59 +153,91 @@ install: ## [local] Create venv and install dependencies
 	@echo "Edit make.env → PROD_URL, PROD_SSH for cloud targets"
 
 # =============================================================================
-# PRODUCTION — call cloud API from your machine (default)
+# PRODUCTION API — curl $(API_URL); use prod-* targets (aliases kept for compat)
 # =============================================================================
 
-health: ## [prod] GET /health
+_health:
 	curl -s "$(API_URL)/health" $(FORMAT)
 
-domain-ip:
-	dig +short $(DOMAIN)
-	dig +short www.$(DOMAIN)
-	dig +short api.$(DOMAIN)
-	dig +short www.api.$(DOMAIN)
-	dig +short www.api.$(DOMAIN)
+prod-health: ## [prod] GET /health
+	@$(MAKE) _health API_URL=$(PROD_API_URL)
 
-analyze-headers: ## [prod] POST /analyze/headers (HEADERS=path)
-	@test -n "$(HEADERS)" || (echo "Usage: make analyze-headers HEADERS=path/to/headers.txt"; exit 1)
+health: prod-health ## alias for prod-health
+
+analyze-headers: prod-analyze-headers ## alias
+analyze-headers-sample: prod-analyze-headers-sample ## alias
+analyze-eml: prod-analyze-eml ## alias
+osint-query: prod-osint-query ## alias
+osint-query-sample: prod-osint-query-sample ## alias
+osint-from-analysis: prod-osint-from-analysis ## alias
+osint-from-sample: prod-osint-from-sample ## alias
+report-score: prod-report-score ## alias
+report-from-analysis: prod-report-from-analysis ## alias
+canary-token: prod-canary-token ## alias
+canary-hit: prod-canary-hit ## alias
+canary-demo: prod-canary-demo ## alias
+canary-logs: prod-canary-logs ## alias
+canary-flush: prod-canary-flush ## alias
+
+prod-analyze-headers: ## [prod] POST /analyze/headers (HEADERS=path)
+	@test -n "$(HEADERS)" || (echo "Usage: make prod-analyze-headers HEADERS=path/to/headers.txt"; exit 1)
+	@$(MAKE) _analyze-headers API_URL=$(PROD_API_URL) HEADERS="$(HEADERS)"
+
+_analyze-headers:
 	curl -s -X POST "$(API_URL)/analyze/headers" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
 		-d "$$($(PYTHON) -c "import json, pathlib; print(json.dumps({'raw_headers': pathlib.Path('$(HEADERS)').read_text()}))")" \
 		$(FORMAT)
 
-analyze-headers-sample: ## [prod] POST /analyze/headers (built-in sample)
+prod-analyze-headers-sample: ## [prod] POST /analyze/headers (built-in sample)
+	@$(MAKE) _analyze-headers-sample API_URL=$(PROD_API_URL)
+
+_analyze-headers-sample:
 	curl -s -X POST "$(API_URL)/analyze/headers" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
 		-d '{"raw_headers":"From: scammer@evil-phish.example\nReply-To: collector@different-bad.example\nReturn-Path: <bounce@evil-phish.example>\nSubject: Urgent wire transfer\nAuthentication-Results: mx.example.com; spf=fail; dkim=fail; dmarc=fail\nReceived: from mail.badactor.example ([198.51.100.10]) by mx.example.com; Mon, 1 Jan 2024 11:59:00 +0000\nX-Originating-IP: [203.0.113.99]\n"}' \
 		$(FORMAT)
 
-analyze-eml: ## [prod] POST /analyze/eml (EML=path)
+prod-analyze-eml: ## [prod] POST /analyze/eml (EML=path)
+	@test -n "$(EML)" || (echo "Usage: make prod-analyze-eml EML=path/to/mail.eml"; exit 1)
+	@$(MAKE) _analyze-eml API_URL=$(PROD_API_URL)
+
+_analyze-eml:
 	curl -s -X POST "$(API_URL)/analyze/eml" \
 		$(API_AUTH) \
 		-F "file=@$(EML)" \
 		$(FORMAT)
 
-osint-query: ## [prod] POST /osint/query (IPS= DOMAINS= EMAILS=)
+prod-osint-query: ## [prod] POST /osint/query (IPS= DOMAINS= EMAILS=)
+	@$(MAKE) _osint-query API_URL=$(PROD_API_URL)
+
+_osint-query:
 	curl -s -X POST "$(API_URL)/osint/query" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
 		-d "$$($(PYTHON) -c "import json; ips=[x for x in '$(IPS)'.split(',') if x]; domains=[x for x in '$(DOMAINS)'.split(',') if x]; emails=[x for x in '$(EMAILS)'.split(',') if x]; print(json.dumps({'ips': ips, 'domains': domains, 'emails': emails}))")" \
 		$(FORMAT)
 
-osint-query-sample: ## [prod] POST /osint/query (8.8.8.8, example.com)
-	$(MAKE) osint-query IPS=8.8.8.8 DOMAINS=example.com
+prod-osint-query-sample: ## [prod] POST /osint/query (8.8.8.8, example.com)
+	@$(MAKE) prod-osint-query IPS=8.8.8.8 DOMAINS=example.com
 
-osint-from-analysis: ## [prod] POST /osint/from-analysis (ANALYSIS=file.json)
-	@test -n "$(ANALYSIS)" || (echo "Usage: make osint-from-analysis ANALYSIS=analysis.json"; exit 1)
+prod-osint-from-analysis: ## [prod] POST /osint/from-analysis (ANALYSIS=file.json)
+	@test -n "$(ANALYSIS)" || (echo "Usage: make prod-osint-from-analysis ANALYSIS=analysis.json"; exit 1)
+	@$(MAKE) _osint-from-analysis API_URL=$(PROD_API_URL)
+
+_osint-from-analysis:
 	curl -s -X POST "$(API_URL)/osint/from-analysis" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
 		-d "$$($(PYTHON) -c "import json; from app.core.json_document import load_json_document; print(json.dumps(load_json_document('$(ANALYSIS)')))")" \
 		$(FORMAT)
 
-osint-from-sample: ## [prod] Analyze sample → OSINT pipeline
+prod-osint-from-sample: ## [prod] Analyze sample → OSINT pipeline
+	@$(MAKE) _osint-from-sample API_URL=$(PROD_API_URL)
+
+_osint-from-sample:
 	curl -s -X POST "$(API_URL)/analyze/headers" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
@@ -195,39 +248,44 @@ osint-from-sample: ## [prod] Analyze sample → OSINT pipeline
 		-d @- \
 		$(FORMAT)
 
-report-score: ## [prod] POST /report/score (ANALYSIS=file.json OSINT=osint.json optional)
-	@test -n "$(ANALYSIS)" || (echo "Usage: make report-score ANALYSIS=analysis.json [OSINT=osint.json]"; exit 1)
+prod-report-score: ## [prod] POST /report/score (ANALYSIS=file.json OSINT=osint.json optional)
+	@test -n "$(ANALYSIS)" || (echo "Usage: make prod-report-score ANALYSIS=analysis.json [OSINT=osint.json]"; exit 1)
+	@$(MAKE) _report-score API_URL=$(PROD_API_URL)
+
+_report-score:
 	curl -s -X POST "$(API_URL)/report/score" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
 		-d "$$($(PYTHON) -c "import json, pathlib; from app.core.json_document import load_json_document; a=load_json_document('$(ANALYSIS)'); o=pathlib.Path('$(OSINT)'); payload={'analysis': a, 'include_source': True}; payload['osint']=load_json_document(o) if '$(OSINT)' and o.is_file() else None; print(json.dumps(payload))")" \
 		$(FORMAT)
 
-report-from-analysis: ## [prod] POST /report/from-analysis — analyze JSON → OSINT → score
-	@test -n "$(ANALYSIS)" || (echo "Usage: make report-from-analysis ANALYSIS=analysis.json"; exit 1)
+prod-report-from-analysis: ## [prod] POST /report/from-analysis — analyze JSON → OSINT → score
+	@test -n "$(ANALYSIS)" || (echo "Usage: make prod-report-from-analysis ANALYSIS=analysis.json"; exit 1)
+	@$(MAKE) _report-from-analysis API_URL=$(PROD_API_URL)
+
+_report-from-analysis:
 	curl -s -X POST "$(API_URL)/report/from-analysis" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
 		-d "$$($(PYTHON) -c "import json; from app.core.json_document import load_json_document; print(json.dumps(load_json_document('$(ANALYSIS)')))")" \
 		$(FORMAT)
 
-canary-token: ## [prod] Generate canary embed + register on VPS (TRAP=pixel|portfolio|both)
-	@OUT="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(API_URL)" --count 1 --trap $(TRAP) --json)"; \
+prod-canary-token: ## [prod] Generate canary embed + register on VPS (TRAP=pixel|portfolio|both)
+	@OUT="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(PROD_API_URL)" --count 1 --trap $(TRAP) --json)"; \
 	echo "$$OUT" | $(PYTHON) -m json.tool; \
 	TOKEN="$$($(PYTHON) -c "import json,sys; print(json.loads(sys.argv[1])['token'])" "$$OUT")"; \
 	$(MAKE) prod-canary-register TOKEN="$$TOKEN"
-
-canary-register: ## [prod] Register existing TOKEN in local DB
-	@test -n "$(TOKEN)" || (echo "Usage: make canary-register TOKEN=your-token"; exit 1)
-	$(PYTHON) scripts/register_canary_token.py "$(TOKEN)" --db-path $(CANARY_DB)
 
 prod-canary-register: ## [prod] Register TOKEN on VPS via SSH
 	@test -n "$(TOKEN)" || (echo "Usage: make prod-canary-register TOKEN=your-token"; exit 1)
 	$(SSH_CMD) "cd $(PROD_REMOTE_DIR) && docker compose exec -T $(DOCKER_SERVICE) \
 		python scripts/register_canary_token.py '$(TOKEN)' --db-path $(DOCKER_CANARY_DB)"
 
-canary-hit: ## [prod] Trigger trap (TOKEN= required, TRAP=pixel|portfolio)
-	@test -n "$(TOKEN)" || (echo "Usage: make canary-hit TOKEN=your-token [TRAP=pixel|portfolio]"; exit 1)
+prod-canary-hit: ## [prod] Trigger trap (TOKEN= required, TRAP=pixel|portfolio)
+	@test -n "$(TOKEN)" || (echo "Usage: make prod-canary-hit TOKEN=your-token [TRAP=pixel|portfolio]"; exit 1)
+	@$(MAKE) _canary-hit API_URL=$(PROD_API_URL)
+
+_canary-hit:
 	@if [ "$(TRAP)" = "portfolio" ]; then \
 		URL="$(API_URL)/portfolio/$(TOKEN)"; \
 	else \
@@ -236,15 +294,13 @@ canary-hit: ## [prod] Trigger trap (TOKEN= required, TRAP=pixel|portfolio)
 	curl -s -H "User-Agent: Makefile-Test/1.0" \
 		"$$URL" -o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"
 
-canary-demo: ## [prod] Generate token, register on VPS, hit trap on cloud (TRAP=pixel|portfolio)
-	@TOKEN="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(API_URL)" --count 1 --trap $(TRAP) --json \
+prod-canary-demo: ## [prod] Generate token, register on VPS, hit trap on cloud (TRAP=pixel|portfolio)
+	@TOKEN="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(PROD_API_URL)" --count 1 --trap $(TRAP) --json \
 		| $(PYTHON) -c "import sys,json; print(json.load(sys.stdin)['token'])")"; \
 	echo "token: $$TOKEN  trap: $(TRAP)"; \
 	$(MAKE) prod-canary-register TOKEN="$$TOKEN"; \
-	$(MAKE) canary-hit TOKEN="$$TOKEN" TRAP=$(TRAP); \
+	$(MAKE) prod-canary-hit TOKEN="$$TOKEN" TRAP=$(TRAP); \
 	echo "Check logs: make prod-canary-logs"
-
-canary-logs: prod-canary-logs ## [prod] Alias — canary hits on server
 
 prod-canary-logs: ## [prod] Canary hits via SSH on VPS
 	$(SSH_CMD) "cd $(PROD_REMOTE_DIR) && docker compose exec -T $(DOCKER_SERVICE) python -c \"\
@@ -253,8 +309,6 @@ db=sqlite3.connect('$(DOCKER_CANARY_DB)'); \
 rows=db.execute('SELECT id, trap, token, client_ip, user_agent, timestamp FROM canary_hits ORDER BY id DESC LIMIT 10').fetchall(); \
 print('id|trap|token|client_ip|user_agent|timestamp'); \
 [print('|'.join(str(c) if c is not None else '' for c in r)) for r in rows] or print('(no hits)')\""
-
-canary-flush: prod-canary-flush ## [prod] Alias — flush canary DB on server
 
 prod-canary-flush: ## [prod] Flush canary SQLite on VPS (KEEP_TOKENS=1 to keep registered tokens)
 	$(SSH_CMD) "cd $(PROD_REMOTE_DIR) && docker compose exec -T $(DOCKER_SERVICE) \
@@ -268,59 +322,63 @@ prod-canary-export: ## [prod] Export canary investigation JSON (TOKEN= TRAP= OUT
 		$(if $(TOKEN),--token '$(TOKEN)',) $(if $(filter command line,$(origin TRAP)),--trap $(CANARY_DB_TRAP),) --run-osint" > "$(OUT)"
 	@echo "Wrote $(OUT)"
 
+domain-ip: ## [local] DNS lookup for DOMAIN
+	dig +short $(DOMAIN)
+	dig +short www.$(DOMAIN)
+
 # =============================================================================
 # LOCAL DEV — run server on localhost
 # =============================================================================
 
-local-dev: ## Run uvicorn with reload on $(LOCAL_URL)
+local-dev: ## [local] Run uvicorn with reload on localhost:$(LOCAL_PORT)
 	$(UVICORN) app.main:app --host $(HOST) --port $(LOCAL_PORT) --reload
 
-local-docker-up: ## Start local Docker stack (port $(LOCAL_PORT))
+local-docker-up: ## [local] Start local Docker stack (port $(LOCAL_PORT))
 	docker compose up --build -d
 
-local-docker-down: ## Stop local Docker stack
+local-docker-down: ## [local] Stop local Docker stack
 	docker compose down
 
-local-docker-logs: ## Tail local API container logs
+local-docker-logs: ## [local] Tail local API container logs
 	docker compose logs -f api
 
-local-health: ## GET /health on localhost
-	$(MAKE) health API_URL=$(LOCAL_URL)
+local-health: ## [local] GET /health on localhost
+	@$(MAKE) _health API_URL=$(LOCAL_URL)
 
-local-analyze-headers: ## POST /analyze/headers on localhost
-	$(MAKE) analyze-headers API_URL=$(LOCAL_URL) HEADERS="$(HEADERS)"
+local-analyze-headers: ## [local] POST /analyze/headers on localhost
+	@$(MAKE) _analyze-headers API_URL=$(LOCAL_URL) HEADERS="$(HEADERS)"
 
-local-analyze-headers-sample: ## POST /analyze/headers sample on localhost
-	$(MAKE) analyze-headers-sample API_URL=$(LOCAL_URL)
+local-analyze-headers-sample: ## [local] POST /analyze/headers sample on localhost
+	@$(MAKE) _analyze-headers-sample API_URL=$(LOCAL_URL)
 
-local-analyze-eml: ## POST /analyze/eml on localhost
-	$(MAKE) analyze-eml API_URL=$(LOCAL_URL) EML="$(EML)"
+local-analyze-eml: ## [local] POST /analyze/eml on localhost
+	@$(MAKE) _analyze-eml API_URL=$(LOCAL_URL)
 
-local-osint-query: ## POST /osint/query on localhost
-	$(MAKE) osint-query API_URL=$(LOCAL_URL) IPS="$(IPS)" DOMAINS="$(DOMAINS)" EMAILS="$(EMAILS)"
+local-osint-query: ## [local] POST /osint/query on localhost
+	@$(MAKE) _osint-query API_URL=$(LOCAL_URL)
 
-local-osint-query-sample: ## POST /osint/query sample on localhost
-	$(MAKE) osint-query-sample API_URL=$(LOCAL_URL)
+local-osint-query-sample: ## [local] POST /osint/query sample on localhost
+	@$(MAKE) _osint-query API_URL=$(LOCAL_URL) IPS=8.8.8.8 DOMAINS=example.com
 
-local-osint-from-analysis: ## POST /osint/from-analysis on localhost
-	$(MAKE) osint-from-analysis API_URL=$(LOCAL_URL) ANALYSIS="$(ANALYSIS)"
+local-osint-from-analysis: ## [local] POST /osint/from-analysis on localhost
+	@$(MAKE) _osint-from-analysis API_URL=$(LOCAL_URL)
 
-local-osint-from-sample: ## Analyze → OSINT on localhost
-	$(MAKE) osint-from-sample API_URL=$(LOCAL_URL)
+local-osint-from-sample: ## [local] Analyze → OSINT on localhost
+	@$(MAKE) _osint-from-sample API_URL=$(LOCAL_URL)
 
-local-report-score: ## POST /report/score on localhost
-	$(MAKE) report-score API_URL=$(LOCAL_URL) ANALYSIS="$(ANALYSIS)" OSINT="$(OSINT)"
+local-report-score: ## [local] POST /report/score on localhost
+	@$(MAKE) _report-score API_URL=$(LOCAL_URL)
 
-local-report-from-analysis: ## POST /report/from-analysis on localhost
-	$(MAKE) report-from-analysis API_URL=$(LOCAL_URL) ANALYSIS="$(ANALYSIS)"
+local-report-from-analysis: ## [local] POST /report/from-analysis on localhost
+	@$(MAKE) _report-from-analysis API_URL=$(LOCAL_URL)
 
-local-cli-report: ## CLI threat report (ANALYSIS= OUT=report.json, no server)
+local-cli-report: ## [local] CLI threat report (ANALYSIS= OUT=report.json, no server)
 	@test -n "$(ANALYSIS)" || (echo "Usage: make local-cli-report ANALYSIS=analysis.json [OUT=report.json]"; exit 1)
 	$(PYTHON) -m app.cli.threat_report "$(ANALYSIS)" \
 		$(if $(OSINT),--osint "$(OSINT)",) \
 		$(if $(OUT),-o "$(OUT)",)
 
-local-canary-export: ## Export canary investigation from local DB (TOKEN= TRAP= OUT=)
+local-canary-export: ## [local] Export canary investigation from local DB (TOKEN= TRAP= OUT=)
 	@test -n "$(OUT)" || (echo "Usage: make local-canary-export OUT=investigation.json [TOKEN=] [TRAP=portfolio|pixel]"; exit 1)
 	@mkdir -p "$(dir $(OUT))"
 	$(PYTHON) scripts/export_canary_investigation.py --db-path $(CANARY_DB) \
@@ -331,35 +389,29 @@ local-canary-export: ## Export canary investigation from local DB (TOKEN= TRAP= 
 		-o "$(OUT)"
 	@echo "Wrote $(OUT)"
 
-local-visualize: ## Pandas table view (REPORT=investigation.json [HTML=report.html] [TEXT=report.txt])
+local-visualize: ## [local] Pandas table view (REPORT=investigation.json [HTML=report.html] [TEXT=report.txt])
 	@test -n "$(REPORT)" || (echo "Usage: make local-visualize REPORT=investigation.json [HTML=out.html] [TEXT=out.txt]"; exit 1)
 	$(PYTHON) -m app.cli.visualize_report "$(REPORT)" \
 		$(if $(HTML),--html "$(HTML)",) \
 		$(if $(TEXT),--text "$(TEXT)",)
 
-json-extract: ## Strip curl noise from captured output (IN=file OUT=clean.json)
+json-extract: ## [local] Strip curl noise from captured output (IN=file OUT=clean.json)
 	@test -n "$(IN)" || (echo "Usage: make json-extract IN=report2.json OUT=clean.json"; exit 1)
 	$(PYTHON) scripts/extract_json.py "$(IN)" $(if $(OUT),-o "$(OUT)",)
 
-local-canary-token: ## Generate + register canary token for localhost (TRAP=pixel|portfolio|both)
+local-canary-token: ## [local] Generate + register canary token (TRAP=pixel|portfolio|both)
 	$(PYTHON) scripts/generate_canary_token.py --base-url "$(LOCAL_URL)" --count 1 \
 		--trap $(TRAP) --register-db $(CANARY_DB)
 
-local-canary-register: ## Register TOKEN in local DB
+local-canary-register: ## [local] Register TOKEN in local DB
 	@test -n "$(TOKEN)" || (echo "Usage: make local-canary-register TOKEN=your-token"; exit 1)
 	$(PYTHON) scripts/register_canary_token.py "$(TOKEN)" --db-path $(CANARY_DB)
 
-local-canary-hit: ## Trigger trap on localhost (TOKEN=, TRAP=pixel|portfolio)
+local-canary-hit: ## [local] Trigger trap on localhost (TOKEN=, TRAP=pixel|portfolio)
 	@test -n "$(TOKEN)" || (echo "Usage: make local-canary-hit TOKEN=your-token [TRAP=pixel|portfolio]"; exit 1)
-	@if [ "$(TRAP)" = "portfolio" ]; then \
-		URL="$(LOCAL_URL)/portfolio/$(TOKEN)"; \
-	else \
-		URL="$(LOCAL_URL)/images/$(TOKEN).png"; \
-	fi; \
-	curl -s -H "User-Agent: Makefile-Test/1.0" \
-		"$$URL" -o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"
+	@$(MAKE) _canary-hit API_URL=$(LOCAL_URL)
 
-local-canary-demo: ## Generate token, register, hit trap locally, show DB (TRAP=pixel|portfolio)
+local-canary-demo: ## [local] Generate token, register, hit trap locally, show DB (TRAP=pixel|portfolio)
 	@TOKEN="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(LOCAL_URL)" --count 1 --trap $(TRAP) --json \
 		| $(PYTHON) -c "import sys,json; print(json.load(sys.stdin)['token'])")"; \
 	echo "token: $$TOKEN  trap: $(TRAP)"; \
@@ -367,7 +419,7 @@ local-canary-demo: ## Generate token, register, hit trap locally, show DB (TRAP=
 	$(MAKE) local-canary-hit TOKEN="$$TOKEN" TRAP=$(TRAP); \
 	$(MAKE) local-canary-logs
 
-local-canary-logs: ## Canary hits — local docker if running, else local SQLite
+local-canary-logs: ## [local] Canary hits — local docker if running, else local SQLite
 	@if docker compose ps --status running -q $(DOCKER_SERVICE) 2>/dev/null | grep -q .; then \
 		$(MAKE) local-canary-logs-docker; \
 	else \
@@ -390,7 +442,7 @@ rows=db.execute('SELECT id, trap, token, client_ip, user_agent, timestamp FROM c
 print('id|trap|token|client_ip|user_agent|timestamp'); \
 [print('|'.join(str(c) if c is not None else '' for c in r)) for r in rows] or print('(no hits)')"
 
-local-canary-flush: ## Flush local canary DB — docker if running, else ./data/canary.db
+local-canary-flush: ## [local] Flush local canary DB — docker if running, else ./data/canary.db
 	@if docker compose ps --status running -q $(DOCKER_SERVICE) 2>/dev/null | grep -q .; then \
 		$(MAKE) local-canary-flush-docker; \
 	else \
@@ -404,14 +456,14 @@ local-canary-flush-docker: ## Flush canary DB in local Docker volume
 	docker compose exec -T $(DOCKER_SERVICE) \
 		python scripts/flush_canary_db.py --db-path $(DOCKER_CANARY_DB) $(CANARY_FLUSH_FLAGS)
 
-local-cli-eml: ## Analyze .eml offline (no server)
+local-cli-eml: ## [local] Analyze .eml offline (no server)
 	$(PYTHON) -m app.cli.header_eval --eml "$(EML)" --pretty
 
-local-cli-headers: ## Analyze headers file offline (HEADERS=)
+local-cli-headers: ## [local] Analyze headers file offline (HEADERS=)
 	@test -n "$(HEADERS)" || (echo "Usage: make local-cli-headers HEADERS=path"; exit 1)
 	$(PYTHON) -m app.cli.header_eval --headers-file "$(HEADERS)" --headers-only --pretty
 
-local-docs: ## Print local Swagger URL
+local-docs: ## [local] Print local Swagger URL
 	@echo "$(LOCAL_URL)/docs  (requires DEBUG=true in .env)"
 
 # =============================================================================

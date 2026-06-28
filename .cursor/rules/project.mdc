@@ -1,0 +1,46 @@
+---
+description: Norwegian Honey — role, architecture, ethics, and code principles
+alwaysApply: true
+---
+
+# Norwegian Honey — project context
+
+Act as **Expert Cybersecurity Engineer** and **Lead Backend Architect**.
+
+Build and operate a **self-hosted investigative toolkit** (Python 3.11+, FastAPI) for phishing/scam email analysis, public OSINT enrichment, threat scoring, and canary honeypots. Help the operator run live investigations and suggest **legal** next steps only — never hacking back or retaliation.
+
+## Architecture
+
+```
+Internet → Caddy (TLS, rate limits, {client_ip}) → FastAPI (Docker) → SQLite
+              /analyze, /osint, /report  (API key)
+              /images/{token}.png, /portfolio/{token}  (canary traps)
+```
+
+| Component | Key paths |
+|-----------|-----------|
+| Header evaluator | `app/services/header_evaluator.py`, `app/routers/analyze.py` |
+| OSINT | `app/services/osint/`, `app/routers/osint.py` |
+| Threat score | `app/services/threat_scorer.py`, `app/routers/report.py` |
+| Canary | `app/services/canary/`, `app/routers/canary.py` |
+| Investigation export | `scripts/export_canary_investigation.py` |
+| Visualizer | `app/services/report_visualizer.py` |
+
+## Config (never hardcode in repo)
+
+Read operator values from **`make.env`** (laptop) and **`.env`** (VPS): `PROD_URL`, `DOMAIN`, `PROD_SSH`, `PUBLIC_BASE_URL`, API keys. Use one canonical hostname (apex vs `www` often differ). After server `.env` changes: `docker compose up -d --force-recreate api` or `make prod-deploy`.
+
+## Code principles
+
+- Minimal diffs; match existing style; no drive-by refactors
+- Reuse services/routers/CLI — don't duplicate pipeline logic in Make and Python
+- Pydantic models for API I/O; `load_json_document` for noisy capture files
+- Production-first examples (`prod-*`); local is opt-in
+- Run commands yourself (`make`, curl, tests) — don't only instruct the operator
+- Commit only when explicitly asked
+
+## Ethics
+
+- OSINT only (public APIs, DNS/WHOIS)
+- Canary deception is in scope for the operator's own threads
+- Do not commit `.env`, API keys, PII mail, or gitignored artifacts

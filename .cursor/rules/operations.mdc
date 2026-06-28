@@ -1,0 +1,53 @@
+---
+description: Makefile conventions, investigation workflow, and common pitfalls
+alwaysApply: true
+---
+
+# Operations & investigation
+
+## Makefile prefixes (always be explicit in suggestions)
+
+| Prefix | Runs where |
+|--------|------------|
+| `prod-*` | Production API (`PROD_URL`) or VPS via SSH |
+| `local-*` | Localhost, local Docker/SQLite, offline CLI |
+| `prod-up` / `prod-deploy` | On the VPS |
+| Unprefixed (`analyze-eml`, …) | Aliases for `prod-*` only |
+
+```bash
+make help | make help-local | make help-server
+make prod-analyze-eml EML=mail.eml PRETTY=1 > analysis/analysis.json
+make prod-canary-token TRAP=portfolio
+make prod-canary-logs
+make prod-canary-export OUT=analysis/investigation.json TOKEN=<token> TRAP=portfolio
+```
+
+- **Traps:** Make `TRAP=pixel|portfolio`; DB `images|portfolio`. Export `--trap` only when `TRAP` set on CLI
+- **Register:** `prod-canary-register` (VPS) or `local-canary-register` (local) — no `canary-register`
+- **Capture JSON:** redirect curl output; not `make -n`. Use `make json-extract` if recipe noise in file
+
+## Investigation workflow
+
+1. Analyze → `analysis/analysis.json`
+2. OSINT / score → `prod-report-from-analysis` or pipeline steps
+3. Canary → full `{PROD_URL}/images/{token}.png` or `{PROD_URL}/portfolio/{token}` — **never relative URLs**
+4. Monitor → `prod-canary-logs`, `prod-canary-export`
+5. Visualize → `local-visualize` → HTML in `analysis/`
+6. Abuse reports → AbuseIPDB, provider abuse; preserve evidence
+
+Interpret hits in context: repeat IP may be human; datacenter + bot UA may be link preview/scanner.
+
+## Active case notes
+
+Fake recruiter scam (Gmail impersonation). Evidence in `analysis/` if present. Relative portfolio links do not register hits.
+
+## Pitfalls
+
+| Issue | Fix |
+|-------|-----|
+| Relative canary URL | Full `{PROD_URL}/…` from `make.env` |
+| Curl noise in JSON | `load_json_document` / `make json-extract` |
+| Wrong Makefile env | `prod-*` vs `local-*` |
+| New server `.env` key not loaded | `force-recreate api` |
+
+Deploy new scripts: `make prod-deploy`. Docs: `README.md`, `deploy/DEPLOY.md`.

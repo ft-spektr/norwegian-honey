@@ -33,9 +33,9 @@ cp make.env.example make.env          # PROD_SSH for remote canary ops
 cp .env.example .env                  # INVESTIGATOR_API_KEY for /analyze, /osint, /report
 ssh-add ~/.ssh/norwegian-honey        # if your deploy key has a passphrase
 
-make health PRETTY=1
-make analyze-eml EML=suspicious.eml PRETTY=1
-make canary-token TRAP=portfolio      # generate + register token on VPS
+make prod-health PRETTY=1
+make prod-analyze-eml EML=suspicious.eml PRETTY=1
+make prod-canary-token TRAP=portfolio      # generate + register token on VPS
 make prod-canary-logs
 ```
 
@@ -52,18 +52,31 @@ With `DEBUG=true` in `.env`, `/analyze`, `/osint`, and `/report` work without an
 
 ## Makefile targets
 
+Targets are prefixed by **where they run**:
+
+| Prefix | Environment | Examples |
+|--------|-------------|----------|
+| **`prod-*`** | Production API at `$(PROD_URL)` or VPS via SSH | `prod-analyze-eml`, `prod-canary-logs`, `prod-canary-export` |
+| **`local-*`** | Localhost, local Docker/SQLite, or offline CLI | `local-dev`, `local-canary-export`, `local-cli-report` |
+| **`prod-up` / `prod-deploy`** | Commands run **on the VPS** | `make prod-deploy` (SSH + git pull) |
+| **Unprefixed** | Backward-compatible **aliases for `prod-*`** | `analyze-eml` → `prod-analyze-eml` |
+
+Use an explicit prefix when in doubt — unprefixed names always hit production.
+
 | Command | What |
 |---------|------|
-| `make help` | Production targets (default) — `https://canary.example.com` |
+| `make help` | Production targets (`prod-*` and aliases) |
 | `make help-local` | Local dev — `local-*` targets |
 | `make help-ngrok` | ngrok tunnel — `ngrok-*` targets |
 | `make help-server` | Deploy commands to run on the VPS |
 
 ```bash
-make analyze-eml EML=phish.eml PRETTY=1       # production
-make local-analyze-eml EML=phish.eml PRETTY=1 # localhost
-make report-from-analysis ANALYSIS=analysis.json PRETTY=1
+make prod-analyze-eml EML=phish.eml PRETTY=1       # production (explicit)
+make analyze-eml EML=phish.eml PRETTY=1            # same — alias
+make local-analyze-eml EML=phish.eml PRETTY=1      # localhost
+make prod-report-from-analysis ANALYSIS=analysis.json PRETTY=1
 make local-cli-report ANALYSIS=analysis.json OUT=report.json
+make prod-canary-export OUT=analysis/investigation.json TOKEN=myprofile TRAP=portfolio
 make local-visualize REPORT=investigation.json HTML=investigation.html
 make json-extract IN=capture.json OUT=clean.json
 ```
