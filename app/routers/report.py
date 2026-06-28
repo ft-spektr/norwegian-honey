@@ -6,14 +6,13 @@ from fastapi import APIRouter, Depends
 
 from app.config import Settings, get_settings
 from app.core.security import require_investigator
-from app.models.analyze import HeaderAnalysisResponse
 from app.models.osint import OSINTQueryRequest
 from app.models.canary_investigation import CanaryInvestigationReport, CanaryInvestigationRequest
-from app.models.report import ThreatScoreReport, ThreatScoreRequest
+from app.models.report import ReportFromAnalysisRequest, ThreatScoreReport, ThreatScoreRequest
 from app.routers.canary import get_canary_storage
 from app.services.canary_investigation import build_canary_investigation
 from app.services.osint.aggregator import aggregate_osint
-from app.services.threat_scorer import build_threat_report
+from app.services.threat_scorer import build_threat_report, merge_osint
 
 router = APIRouter(
     prefix="/report",
@@ -25,26 +24,36 @@ router = APIRouter(
 @router.post("/score", response_model=ThreatScoreReport)
 async def report_score(payload: ThreatScoreRequest) -> ThreatScoreReport:
     """Build a phishing/spam threat score from analysis and optional OSINT results."""
+    osint = merge_osint(payload.osint, payload.investigation.osint if payload.investigation else None)
     return build_threat_report(
         payload.analysis,
-        payload.osint,
+        osint,
+        investigation=payload.investigation,
         include_source=payload.include_source,
     )
 
 
 @router.post("/from-analysis", response_model=ThreatScoreReport)
 async def report_from_analysis(
-    analysis: HeaderAnalysisResponse,
+    payload: ReportFromAnalysisRequest,
     settings: Settings = Depends(get_settings),
 ) -> ThreatScoreReport:
-    """Run OSINT on analysis entities, then produce a threat score report."""
+    """Run OSINT on analysis entities, optionally merge canary investigation, then score."""
+    analysis = payload.analysis
     osint_request = OSINTQueryRequest(
         ips=analysis.extracted_ips[: settings.osint_max_entities_per_type],
         domains=analysis.extracted_domains[: settings.osint_max_entities_per_type],
         emails=analysis.extracted_emails[: settings.osint_max_entities_per_type],
     )
     osint = await aggregate_osint(osint_request, settings)
-    return build_threat_report(analysis, osint, include_source=True)
+    if payload.investigation and payload.investigation.osint:
+        osint = merge_osint(osint, payload.investigation.osint)
+    return build_threat_report(
+        analysis,
+        osint,
+        investigation=payload.investigation,
+        include_source=payload.include_source,
+    )
 
 
 @router.post("/canary-investigation", response_model=CanaryInvestigationReport)

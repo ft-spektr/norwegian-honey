@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
 from app.models.analyze import HeaderAnalysisResponse
 from app.models.canary import StoredCanaryHit
 from app.models.osint import OSINTQueryResponse
-from app.models.report import ThreatScoreReport
+
+if TYPE_CHECKING:
+    from app.models.report import ThreatScoreReport
 
 
 class IPProfile(BaseModel):

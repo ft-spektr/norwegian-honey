@@ -24,7 +24,7 @@ make prod-canary-export OUT=analysis/investigation.json TOKEN=<token> TRAP=portf
 
 - **Traps:** Make `TRAP=pixel|portfolio`; DB `images|portfolio`. Export `--trap` only when `TRAP` set on CLI
 - **Register:** `prod-canary-register` (VPS) or `local-canary-register` (local) — no `canary-register`
-- **Capture JSON:** redirect curl output; not `make -n`. Use `make json-extract` if recipe noise in file
+- **Capture JSON:** use `OUT=file.json` (preferred) or shell redirect; not `make -n`. Noisy old captures are auto-stripped by `load_json_document`
 
 ## Investigation workflow
 

@@ -12,6 +12,9 @@
 HELP_FILE      := $(firstword $(MAKEFILE_LIST))
 .DEFAULT_GOAL  := help
 
+# Keep `make target > file` captures free of "Entering/Leaving directory" lines.
+MAKEFLAGS += --no-print-directory
+
 # --- Client config (production URL, SSH for remote logs) ---
 -include make.env
 -include .env
@@ -66,6 +69,10 @@ ifeq ($(PRETTY),1)
 else
   FORMAT =
 endif
+
+# curl_json.py: no recipe echo; supports OUT= and PRETTY=1 without shell redirect
+CURL_JSON       = $(PYTHON) scripts/curl_json.py
+CURL_JSON_FLAGS = $(if $(OUT),-o "$(OUT)",) $(if $(filter 1,$(PRETTY)),--pretty,)
 
 KEEP_TOKENS    ?=
 CANARY_FLUSH_FLAGS = $(if $(KEEP_TOKENS),--keep-tokens,)
@@ -153,14 +160,14 @@ install: ## [local] Create venv and install dependencies
 	@echo "Edit make.env → PROD_URL, PROD_SSH for cloud targets"
 
 # =============================================================================
-# PRODUCTION API — curl $(API_URL); use prod-* targets (aliases kept for compat)
+# PRODUCTION API — shared _* recipes; prod/local set API_BASE (no recursive make)
 # =============================================================================
 
-_health:
-	curl -s "$(API_URL)/health" $(FORMAT)
+prod-health: API_BASE = $(PROD_API_URL)
+prod-health: _health ## [prod] GET /health
 
-prod-health: ## [prod] GET /health
-	@$(MAKE) _health API_URL=$(PROD_API_URL)
+_health:
+	@$(CURL_JSON) $(CURL_JSON_FLAGS) -- "$(API_BASE)/health"
 
 health: prod-health ## alias for prod-health
 
@@ -179,96 +186,90 @@ canary-demo: prod-canary-demo ## alias
 canary-logs: prod-canary-logs ## alias
 canary-flush: prod-canary-flush ## alias
 
-prod-analyze-headers: ## [prod] POST /analyze/headers (HEADERS=path)
-	@test -n "$(HEADERS)" || (echo "Usage: make prod-analyze-headers HEADERS=path/to/headers.txt"; exit 1)
-	@$(MAKE) _analyze-headers API_URL=$(PROD_API_URL) HEADERS="$(HEADERS)"
+prod-analyze-headers: API_BASE = $(PROD_API_URL)
+prod-analyze-headers: _analyze-headers ## [prod] POST /analyze/headers (HEADERS=path)
 
 _analyze-headers:
-	curl -s -X POST "$(API_URL)/analyze/headers" \
+	@test -n "$(HEADERS)" || (echo "Usage: make prod-analyze-headers HEADERS=path/to/headers.txt"; exit 1)
+	@$(CURL_JSON) $(CURL_JSON_FLAGS) -- -X POST "$(API_BASE)/analyze/headers" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
-		-d "$$($(PYTHON) -c "import json, pathlib; print(json.dumps({'raw_headers': pathlib.Path('$(HEADERS)').read_text()}))")" \
-		$(FORMAT)
+		-d "$$($(PYTHON) -c "import json, pathlib; print(json.dumps({'raw_headers': pathlib.Path('$(HEADERS)').read_text()}))")"
 
-prod-analyze-headers-sample: ## [prod] POST /analyze/headers (built-in sample)
-	@$(MAKE) _analyze-headers-sample API_URL=$(PROD_API_URL)
+prod-analyze-headers-sample: API_BASE = $(PROD_API_URL)
+prod-analyze-headers-sample: _analyze-headers-sample ## [prod] POST /analyze/headers (built-in sample)
 
 _analyze-headers-sample:
-	curl -s -X POST "$(API_URL)/analyze/headers" \
+	@$(CURL_JSON) $(CURL_JSON_FLAGS) -- -X POST "$(API_BASE)/analyze/headers" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
-		-d '{"raw_headers":"From: scammer@evil-phish.example\nReply-To: collector@different-bad.example\nReturn-Path: <bounce@evil-phish.example>\nSubject: Urgent wire transfer\nAuthentication-Results: mx.example.com; spf=fail; dkim=fail; dmarc=fail\nReceived: from mail.badactor.example ([198.51.100.10]) by mx.example.com; Mon, 1 Jan 2024 11:59:00 +0000\nX-Originating-IP: [203.0.113.99]\n"}' \
-		$(FORMAT)
+		-d '{"raw_headers":"From: scammer@evil-phish.example\nReply-To: collector@different-bad.example\nReturn-Path: <bounce@evil-phish.example>\nSubject: Urgent wire transfer\nAuthentication-Results: mx.example.com; spf=fail; dkim=fail; dmarc=fail\nReceived: from mail.badactor.example ([198.51.100.10]) by mx.example.com; Mon, 1 Jan 2024 11:59:00 +0000\nX-Originating-IP: [203.0.113.99]\n"}'
 
-prod-analyze-eml: ## [prod] POST /analyze/eml (EML=path)
-	@test -n "$(EML)" || (echo "Usage: make prod-analyze-eml EML=path/to/mail.eml"; exit 1)
-	@$(MAKE) _analyze-eml API_URL=$(PROD_API_URL)
+prod-analyze-eml: API_BASE = $(PROD_API_URL)
+prod-analyze-eml: _analyze-eml ## [prod] POST /analyze/eml (EML=path [OUT=file.json])
 
 _analyze-eml:
-	curl -s -X POST "$(API_URL)/analyze/eml" \
+	@test -n "$(EML)" || (echo "Usage: make prod-analyze-eml EML=path/to/mail.eml [OUT=analysis.json]"; exit 1)
+	@$(CURL_JSON) $(CURL_JSON_FLAGS) -- -X POST "$(API_BASE)/analyze/eml" \
 		$(API_AUTH) \
-		-F "file=@$(EML)" \
-		$(FORMAT)
+		-F "file=@$(EML)"
 
-prod-osint-query: ## [prod] POST /osint/query (IPS= DOMAINS= EMAILS=)
-	@$(MAKE) _osint-query API_URL=$(PROD_API_URL)
+prod-osint-query: API_BASE = $(PROD_API_URL)
+prod-osint-query: _osint-query ## [prod] POST /osint/query (IPS= DOMAINS= EMAILS= [OUT=file.json])
 
 _osint-query:
-	curl -s -X POST "$(API_URL)/osint/query" \
+	@$(CURL_JSON) $(CURL_JSON_FLAGS) -- -X POST "$(API_BASE)/osint/query" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
-		-d "$$($(PYTHON) -c "import json; ips=[x for x in '$(IPS)'.split(',') if x]; domains=[x for x in '$(DOMAINS)'.split(',') if x]; emails=[x for x in '$(EMAILS)'.split(',') if x]; print(json.dumps({'ips': ips, 'domains': domains, 'emails': emails}))")" \
-		$(FORMAT)
+		-d "$$($(PYTHON) -c "import json; ips=[x for x in '$(IPS)'.split(',') if x]; domains=[x for x in '$(DOMAINS)'.split(',') if x]; emails=[x for x in '$(EMAILS)'.split(',') if x]; print(json.dumps({'ips': ips, 'domains': domains, 'emails': emails}))")"
 
-prod-osint-query-sample: ## [prod] POST /osint/query (8.8.8.8, example.com)
-	@$(MAKE) prod-osint-query IPS=8.8.8.8 DOMAINS=example.com
+prod-osint-query-sample: API_BASE = $(PROD_API_URL)
+prod-osint-query-sample: IPS = 8.8.8.8
+prod-osint-query-sample: DOMAINS = example.com
+prod-osint-query-sample: _osint-query ## [prod] POST /osint/query (8.8.8.8, example.com)
 
-prod-osint-from-analysis: ## [prod] POST /osint/from-analysis (ANALYSIS=file.json)
-	@test -n "$(ANALYSIS)" || (echo "Usage: make prod-osint-from-analysis ANALYSIS=analysis.json"; exit 1)
-	@$(MAKE) _osint-from-analysis API_URL=$(PROD_API_URL)
+prod-osint-from-analysis: API_BASE = $(PROD_API_URL)
+prod-osint-from-analysis: _osint-from-analysis ## [prod] POST /osint/from-analysis (ANALYSIS=file.json [OUT=file.json])
 
 _osint-from-analysis:
-	curl -s -X POST "$(API_URL)/osint/from-analysis" \
+	@test -n "$(ANALYSIS)" || (echo "Usage: make prod-osint-from-analysis ANALYSIS=analysis.json [OUT=osint.json]"; exit 1)
+	@$(CURL_JSON) $(CURL_JSON_FLAGS) -- -X POST "$(API_BASE)/osint/from-analysis" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
-		-d "$$($(PYTHON) -c "import json; from app.core.json_document import load_json_document; print(json.dumps(load_json_document('$(ANALYSIS)')))")" \
-		$(FORMAT)
+		-d "$$($(PYTHON) -c "import json; from app.core.json_document import load_json_document; print(json.dumps(load_json_document('$(ANALYSIS)')))")"
 
-prod-osint-from-sample: ## [prod] Analyze sample → OSINT pipeline
-	@$(MAKE) _osint-from-sample API_URL=$(PROD_API_URL)
+prod-osint-from-sample: API_BASE = $(PROD_API_URL)
+prod-osint-from-sample: _osint-from-sample ## [prod] Analyze sample → OSINT pipeline
 
 _osint-from-sample:
-	curl -s -X POST "$(API_URL)/analyze/headers" \
+	@curl -s -X POST "$(API_BASE)/analyze/headers" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
 		-d '{"raw_headers":"From: scammer@evil-phish.example\nReply-To: collector@different-bad.example\nAuthentication-Results: mx.example.com; spf=fail; dkim=fail; dmarc=fail\nReceived: from mail.badactor.example ([198.51.100.10]) by mx.example.com; Mon, 1 Jan 2024 11:59:00 +0000\nX-Originating-IP: [203.0.113.99]\n"}' \
-	| curl -s -X POST "$(API_URL)/osint/from-analysis" \
+	| $(CURL_JSON) $(CURL_JSON_FLAGS) -- -X POST "$(API_BASE)/osint/from-analysis" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
-		-d @- \
-		$(FORMAT)
+		-d @-
 
-prod-report-score: ## [prod] POST /report/score (ANALYSIS=file.json OSINT=osint.json optional)
-	@test -n "$(ANALYSIS)" || (echo "Usage: make prod-report-score ANALYSIS=analysis.json [OSINT=osint.json]"; exit 1)
-	@$(MAKE) _report-score API_URL=$(PROD_API_URL)
+prod-report-score: API_BASE = $(PROD_API_URL)
+prod-report-score: _report-score ## [prod] POST /report/score (ANALYSIS=file.json OSINT=osint.json optional [OUT=file.json])
 
 _report-score:
-	curl -s -X POST "$(API_URL)/report/score" \
+	@test -n "$(ANALYSIS)" || (echo "Usage: make prod-report-score ANALYSIS=analysis.json [OSINT=osint.json] [INVESTIGATION=investigation.json] [OUT=report.json]"; exit 1)
+	@$(CURL_JSON) $(CURL_JSON_FLAGS) -- -X POST "$(API_BASE)/report/score" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
-		-d "$$($(PYTHON) -c "import json, pathlib; from app.core.json_document import load_json_document; a=load_json_document('$(ANALYSIS)'); o=pathlib.Path('$(OSINT)'); payload={'analysis': a, 'include_source': True}; payload['osint']=load_json_document(o) if '$(OSINT)' and o.is_file() else None; print(json.dumps(payload))")" \
-		$(FORMAT)
+		-d "$$($(PYTHON) -c "import json, pathlib; from app.core.json_document import load_json_document; a=load_json_document('$(ANALYSIS)'); o=pathlib.Path('$(OSINT)'); inv=pathlib.Path('$(INVESTIGATION)'); payload={'analysis': a, 'include_source': True}; payload['osint']=load_json_document(o) if '$(OSINT)' and o.is_file() else None; payload['investigation']=load_json_document(inv) if '$(INVESTIGATION)' and inv.is_file() else None; print(json.dumps(payload))")"
 
-prod-report-from-analysis: ## [prod] POST /report/from-analysis — analyze JSON → OSINT → score
-	@test -n "$(ANALYSIS)" || (echo "Usage: make prod-report-from-analysis ANALYSIS=analysis.json"; exit 1)
-	@$(MAKE) _report-from-analysis API_URL=$(PROD_API_URL)
+prod-report-from-analysis: API_BASE = $(PROD_API_URL)
+prod-report-from-analysis: _report-from-analysis ## [prod] POST /report/from-analysis (ANALYSIS= [INVESTIGATION=] [OUT=])
 
 _report-from-analysis:
-	curl -s -X POST "$(API_URL)/report/from-analysis" \
+	@test -n "$(ANALYSIS)" || (echo "Usage: make prod-report-from-analysis ANALYSIS=analysis.json [INVESTIGATION=investigation.json] [OUT=report.json]"; exit 1)
+	@$(CURL_JSON) $(CURL_JSON_FLAGS) -- -X POST "$(API_BASE)/report/from-analysis" \
 		$(API_AUTH) \
 		-H "Content-Type: application/json" \
-		-d "$$($(PYTHON) -c "import json; from app.core.json_document import load_json_document; print(json.dumps(load_json_document('$(ANALYSIS)')))")" \
-		$(FORMAT)
+		-d "$$($(PYTHON) -c "import json, pathlib; from app.core.json_document import load_json_document; payload={'analysis': load_json_document('$(ANALYSIS)'), 'include_source': True}; inv=pathlib.Path('$(INVESTIGATION)'); payload['investigation']=load_json_document(inv) if '$(INVESTIGATION)' and inv.is_file() else None; print(json.dumps(payload))")"
 
 prod-canary-token: ## [prod] Generate canary embed + register on VPS (TRAP=pixel|portfolio|both)
 	@OUT="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(PROD_API_URL)" --count 1 --trap $(TRAP) --json)"; \
@@ -281,15 +282,15 @@ prod-canary-register: ## [prod] Register TOKEN on VPS via SSH
 	$(SSH_CMD) "cd $(PROD_REMOTE_DIR) && docker compose exec -T $(DOCKER_SERVICE) \
 		python scripts/register_canary_token.py '$(TOKEN)' --db-path $(DOCKER_CANARY_DB)"
 
-prod-canary-hit: ## [prod] Trigger trap (TOKEN= required, TRAP=pixel|portfolio)
-	@test -n "$(TOKEN)" || (echo "Usage: make prod-canary-hit TOKEN=your-token [TRAP=pixel|portfolio]"; exit 1)
-	@$(MAKE) _canary-hit API_URL=$(PROD_API_URL)
+prod-canary-hit: API_BASE = $(PROD_API_URL)
+prod-canary-hit: _canary-hit ## [prod] Trigger trap (TOKEN= required, TRAP=pixel|portfolio)
 
 _canary-hit:
+	@test -n "$(TOKEN)" || (echo "Usage: make prod-canary-hit TOKEN=your-token [TRAP=pixel|portfolio]"; exit 1)
 	@if [ "$(TRAP)" = "portfolio" ]; then \
-		URL="$(API_URL)/portfolio/$(TOKEN)"; \
+		URL="$(API_BASE)/portfolio/$(TOKEN)"; \
 	else \
-		URL="$(API_URL)/images/$(TOKEN).png"; \
+		URL="$(API_BASE)/images/$(TOKEN).png"; \
 	fi; \
 	curl -s -H "User-Agent: Makefile-Test/1.0" \
 		"$$URL" -o /dev/null -w "HTTP %{http_code}, %{size_download} bytes\n"
@@ -342,35 +343,37 @@ local-docker-down: ## [local] Stop local Docker stack
 local-docker-logs: ## [local] Tail local API container logs
 	docker compose logs -f api
 
-local-health: ## [local] GET /health on localhost
-	@$(MAKE) _health API_URL=$(LOCAL_URL)
+local-health: API_BASE = $(LOCAL_URL)
+local-health: _health ## [local] GET /health on localhost
 
-local-analyze-headers: ## [local] POST /analyze/headers on localhost
-	@$(MAKE) _analyze-headers API_URL=$(LOCAL_URL) HEADERS="$(HEADERS)"
+local-analyze-headers: API_BASE = $(LOCAL_URL)
+local-analyze-headers: _analyze-headers ## [local] POST /analyze/headers on localhost
 
-local-analyze-headers-sample: ## [local] POST /analyze/headers sample on localhost
-	@$(MAKE) _analyze-headers-sample API_URL=$(LOCAL_URL)
+local-analyze-headers-sample: API_BASE = $(LOCAL_URL)
+local-analyze-headers-sample: _analyze-headers-sample ## [local] POST /analyze/headers sample on localhost
 
-local-analyze-eml: ## [local] POST /analyze/eml on localhost
-	@$(MAKE) _analyze-eml API_URL=$(LOCAL_URL)
+local-analyze-eml: API_BASE = $(LOCAL_URL)
+local-analyze-eml: _analyze-eml ## [local] POST /analyze/eml on localhost
 
-local-osint-query: ## [local] POST /osint/query on localhost
-	@$(MAKE) _osint-query API_URL=$(LOCAL_URL)
+local-osint-query: API_BASE = $(LOCAL_URL)
+local-osint-query: _osint-query ## [local] POST /osint/query on localhost
 
-local-osint-query-sample: ## [local] POST /osint/query sample on localhost
-	@$(MAKE) _osint-query API_URL=$(LOCAL_URL) IPS=8.8.8.8 DOMAINS=example.com
+local-osint-query-sample: API_BASE = $(LOCAL_URL)
+local-osint-query-sample: IPS = 8.8.8.8
+local-osint-query-sample: DOMAINS = example.com
+local-osint-query-sample: _osint-query ## [local] POST /osint/query sample on localhost
 
-local-osint-from-analysis: ## [local] POST /osint/from-analysis on localhost
-	@$(MAKE) _osint-from-analysis API_URL=$(LOCAL_URL)
+local-osint-from-analysis: API_BASE = $(LOCAL_URL)
+local-osint-from-analysis: _osint-from-analysis ## [local] POST /osint/from-analysis on localhost
 
-local-osint-from-sample: ## [local] Analyze → OSINT on localhost
-	@$(MAKE) _osint-from-sample API_URL=$(LOCAL_URL)
+local-osint-from-sample: API_BASE = $(LOCAL_URL)
+local-osint-from-sample: _osint-from-sample ## [local] Analyze → OSINT on localhost
 
-local-report-score: ## [local] POST /report/score on localhost
-	@$(MAKE) _report-score API_URL=$(LOCAL_URL)
+local-report-score: API_BASE = $(LOCAL_URL)
+local-report-score: _report-score ## [local] POST /report/score on localhost
 
-local-report-from-analysis: ## [local] POST /report/from-analysis on localhost
-	@$(MAKE) _report-from-analysis API_URL=$(LOCAL_URL)
+local-report-from-analysis: API_BASE = $(LOCAL_URL)
+local-report-from-analysis: _report-from-analysis ## [local] POST /report/from-analysis on localhost
 
 local-cli-report: ## [local] CLI threat report (ANALYSIS= OUT=report.json, no server)
 	@test -n "$(ANALYSIS)" || (echo "Usage: make local-cli-report ANALYSIS=analysis.json [OUT=report.json]"; exit 1)
@@ -407,9 +410,8 @@ local-canary-register: ## [local] Register TOKEN in local DB
 	@test -n "$(TOKEN)" || (echo "Usage: make local-canary-register TOKEN=your-token"; exit 1)
 	$(PYTHON) scripts/register_canary_token.py "$(TOKEN)" --db-path $(CANARY_DB)
 
-local-canary-hit: ## [local] Trigger trap on localhost (TOKEN=, TRAP=pixel|portfolio)
-	@test -n "$(TOKEN)" || (echo "Usage: make local-canary-hit TOKEN=your-token [TRAP=pixel|portfolio]"; exit 1)
-	@$(MAKE) _canary-hit API_URL=$(LOCAL_URL)
+local-canary-hit: API_BASE = $(LOCAL_URL)
+local-canary-hit: _canary-hit ## [local] Trigger trap on localhost (TOKEN=, TRAP=pixel|portfolio)
 
 local-canary-demo: ## [local] Generate token, register, hit trap locally, show DB (TRAP=pixel|portfolio)
 	@TOKEN="$$($(PYTHON) scripts/generate_canary_token.py --base-url "$(LOCAL_URL)" --count 1 --trap $(TRAP) --json \

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.models.analyze import HeaderAnalysisResponse
 from app.models.osint import OSINTQueryResponse
@@ -37,9 +37,43 @@ class ThreatScoreReport(BaseModel):
     findings: list[ScoreFinding] = Field(default_factory=list)
     analysis: HeaderAnalysisResponse | None = None
     osint: OSINTQueryResponse | None = None
+    investigation: CanaryInvestigationReport | None = None
 
 
 class ThreatScoreRequest(BaseModel):
     analysis: HeaderAnalysisResponse
     osint: OSINTQueryResponse | None = None
+    investigation: CanaryInvestigationReport | None = None
     include_source: bool = False
+
+
+class ReportFromAnalysisRequest(BaseModel):
+    """Analysis JSON plus optional canary investigation export."""
+
+    analysis: HeaderAnalysisResponse
+    investigation: CanaryInvestigationReport | None = None
+    include_source: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_analysis_body(cls, data: object) -> object:
+        """Allow POST body to be a bare HeaderAnalysisResponse for backward compatibility."""
+        if isinstance(data, dict) and "analysis" not in data and "from_domain" in data:
+            return {"analysis": data, "include_source": True}
+        return data
+
+
+def _rebuild_report_models() -> None:
+    from app.models.canary_investigation import CanaryInvestigationReport
+
+    types_namespace = {
+        "CanaryInvestigationReport": CanaryInvestigationReport,
+        "ThreatScoreReport": ThreatScoreReport,
+    }
+    ThreatScoreReport.model_rebuild(_types_namespace=types_namespace)
+    ThreatScoreRequest.model_rebuild(_types_namespace=types_namespace)
+    ReportFromAnalysisRequest.model_rebuild(_types_namespace=types_namespace)
+    CanaryInvestigationReport.model_rebuild(_types_namespace=types_namespace)
+
+
+_rebuild_report_models()

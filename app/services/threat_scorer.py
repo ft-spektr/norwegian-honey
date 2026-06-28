@@ -12,6 +12,7 @@ from app.models.analyze import (
     AuthResultStatus,
     HeaderAnalysisResponse,
 )
+from app.models.canary_investigation import CanaryInvestigationReport
 from app.models.osint import OSINTQueryResponse
 from app.models.report import CategoryScore, ScoreFinding, ThreatScoreReport
 
@@ -45,6 +46,14 @@ CATEGORY_WEIGHTS = {
     "headers": 0.30,
     "authentication": 0.15,
     "infrastructure": 0.15,
+}
+
+CATEGORY_WEIGHTS_WITH_CANARY = {
+    "identity": 0.35,
+    "headers": 0.28,
+    "authentication": 0.15,
+    "infrastructure": 0.12,
+    "canary": 0.10,
 }
 
 # Recipient-side hops often show private IPs; downweight for inbound mail.
@@ -446,38 +455,176 @@ def _category_score(findings: list[ScoreFinding]) -> int:
     return _clamp_score(sum(f.points for f in findings))
 
 
+def merge_osint(
+    primary: OSINTQueryResponse | None,
+    secondary: OSINTQueryResponse | None,
+) -> OSINTQueryResponse | None:
+    """Merge OSINT results; secondary fills gaps and adds canary hitter IPs."""
+    if primary is None:
+        return secondary
+    if secondary is None:
+        return primary
+
+    seen_ips = {(item.ip, item.source) for item in primary.ips}
+    seen_domains = {(item.domain, item.source) for item in primary.domains}
+    seen_emails = {(item.email, item.source) for item in primary.emails}
+
+    ips = list(primary.ips)
+    for item in secondary.ips:
+        key = (item.ip, item.source)
+        if key not in seen_ips:
+            ips.append(item)
+            seen_ips.add(key)
+
+    domains = list(primary.domains)
+    for item in secondary.domains:
+        key = (item.domain, item.source)
+        if key not in seen_domains:
+            domains.append(item)
+            seen_domains.add(key)
+
+    emails = list(primary.emails)
+    for item in secondary.emails:
+        key = (item.email, item.source)
+        if key not in seen_emails:
+            emails.append(item)
+            seen_emails.add(key)
+
+    return OSINTQueryResponse(ips=ips, domains=domains, emails=emails)
+
+
+def _canary_findings(investigation: CanaryInvestigationReport | None) -> list[ScoreFinding]:
+    if investigation is None or investigation.hit_count == 0:
+        return []
+
+    findings: list[ScoreFinding] = [
+        ScoreFinding(
+            category="canary",
+            code="canary_trap_triggered",
+            severity="high",
+            points=28,
+            message=(
+                f"Canary trap triggered: {investigation.hit_count} hit(s) from "
+                f"{investigation.unique_ip_count} unique IP(s)."
+            ),
+            evidence={
+                "hit_count": investigation.hit_count,
+                "unique_ip_count": investigation.unique_ip_count,
+                "token": investigation.token,
+                "trap": investigation.trap,
+            },
+        )
+    ]
+
+    for profile in investigation.ip_profiles:
+        if profile.role == "human_likely":
+            findings.append(
+                ScoreFinding(
+                    category="canary",
+                    code="canary_human_operator_likely",
+                    severity="high",
+                    points=22,
+                    message=f"Canary opened from consumer/mobile IP {profile.ip} (human-likely).",
+                    evidence={"ip": profile.ip, "role": profile.role, "hit_count": profile.hit_count},
+                )
+            )
+        elif profile.role == "automation_likely":
+            findings.append(
+                ScoreFinding(
+                    category="canary",
+                    code="canary_automation_followup",
+                    severity="medium",
+                    points=14,
+                    message=f"Canary followed by cloud/automation IP {profile.ip}.",
+                    evidence={"ip": profile.ip, "role": profile.role, "hit_count": profile.hit_count},
+                )
+            )
+
+        abuse = profile.osint.get("abuseipdb") or {}
+        score = abuse.get("abuseConfidenceScore")
+        if isinstance(score, (int, float)) and score >= 25:
+            findings.append(
+                ScoreFinding(
+                    category="canary",
+                    code="canary_hitter_abuseipdb_high",
+                    severity="high" if score >= 75 else "medium",
+                    points=35 if score >= 75 else 18,
+                    message=f"Canary hitter {profile.ip} has AbuseIPDB confidence {score}%.",
+                    evidence={"ip": profile.ip, "abuseConfidenceScore": score},
+                )
+            )
+        else:
+            total_reports = abuse.get("totalReports")
+            if isinstance(total_reports, int) and total_reports > 0:
+                findings.append(
+                    ScoreFinding(
+                        category="canary",
+                        code="canary_hitter_abuseipdb_reports",
+                        severity="low",
+                        points=10,
+                        message=f"Canary hitter {profile.ip} has {total_reports} AbuseIPDB report(s).",
+                        evidence={"ip": profile.ip, "totalReports": total_reports},
+                    )
+                )
+
+    return findings
+
+
 def build_threat_report(
     analysis: HeaderAnalysisResponse,
     osint: OSINTQueryResponse | None = None,
     *,
+    investigation: CanaryInvestigationReport | None = None,
     include_source: bool = False,
 ) -> ThreatScoreReport:
+    weights = CATEGORY_WEIGHTS_WITH_CANARY if investigation else CATEGORY_WEIGHTS
+
     identity = _identity_findings(analysis)
     headers = _header_findings(analysis)
     authentication = _auth_findings(analysis)
     infrastructure = _infrastructure_findings(analysis, osint)
+    canary = _canary_findings(investigation)
 
     categories = [
-        CategoryScore(name="identity", score=_category_score(identity), weight=CATEGORY_WEIGHTS["identity"], findings=identity),
-        CategoryScore(name="headers", score=_category_score(headers), weight=CATEGORY_WEIGHTS["headers"], findings=headers),
+        CategoryScore(
+            name="identity",
+            score=_category_score(identity),
+            weight=weights["identity"],
+            findings=identity,
+        ),
+        CategoryScore(
+            name="headers",
+            score=_category_score(headers),
+            weight=weights["headers"],
+            findings=headers,
+        ),
         CategoryScore(
             name="authentication",
             score=_category_score(authentication),
-            weight=CATEGORY_WEIGHTS["authentication"],
+            weight=weights["authentication"],
             findings=authentication,
         ),
         CategoryScore(
             name="infrastructure",
             score=_category_score(infrastructure),
-            weight=CATEGORY_WEIGHTS["infrastructure"],
+            weight=weights["infrastructure"],
             findings=infrastructure,
         ),
     ]
+    if investigation:
+        categories.append(
+            CategoryScore(
+                name="canary",
+                score=_category_score(canary),
+                weight=weights["canary"],
+                findings=canary,
+            )
+        )
 
     overall = round(sum(c.score * c.weight for c in categories))
     overall = _clamp_score(overall)
 
-    all_findings = identity + headers + authentication + infrastructure
+    all_findings = identity + headers + authentication + infrastructure + canary
     all_findings.sort(key=lambda f: f.points, reverse=True)
     top = all_findings[:5]
 
@@ -492,4 +639,5 @@ def build_threat_report(
         findings=all_findings,
         analysis=analysis if include_source else None,
         osint=osint if include_source else None,
+        investigation=investigation if include_source else None,
     )

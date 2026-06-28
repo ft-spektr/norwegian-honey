@@ -74,7 +74,8 @@ Use an explicit prefix when in doubt — unprefixed names always hit production.
 make prod-analyze-eml EML=phish.eml PRETTY=1       # production (explicit)
 make analyze-eml EML=phish.eml PRETTY=1            # same — alias
 make local-analyze-eml EML=phish.eml PRETTY=1      # localhost
-make prod-report-from-analysis ANALYSIS=analysis.json PRETTY=1
+make prod-report-from-analysis ANALYSIS=analysis/analysis.json \
+  INVESTIGATION=analysis/investigation.json PRETTY=1 OUT=analysis/report.json
 make local-cli-report ANALYSIS=analysis.json OUT=report.json
 make prod-canary-export OUT=analysis/investigation.json TOKEN=myprofile TRAP=portfolio
 make local-visualize REPORT=investigation.json HTML=investigation.html
@@ -83,18 +84,19 @@ make json-extract IN=capture.json OUT=clean.json
 
 ### Saving API output to files
 
-Redirect **curl output only** — not a dry-run recipe:
+Prefer **`OUT=`** — writes JSON only (no curl recipe, no API key in the file):
 
 ```bash
-# Good — JSON response only
-make osint-query IPS=1.2.3.4 PRETTY=1 > osint.json
-make analyze-eml EML=phish.eml PRETTY=1 > analysis.json
-
-# Bad — make -n prints the curl command, not the response
-make -n osint-query IPS=1.2.3.4 > capture.json
+make prod-analyze-eml EML=phish.eml PRETTY=1 OUT=analysis/analysis.json
+make prod-osint-from-analysis ANALYSIS=analysis/analysis.json PRETTY=1 OUT=analysis/osint.json
+make prod-report-from-analysis ANALYSIS=analysis/analysis.json PRETTY=1 OUT=analysis/report.json
 ```
 
-If a capture file includes curl/Makefile lines at the top, tools still work — they auto-extract the JSON. To strip noise (and embedded API keys from the recipe):
+Shell redirect (`> file`) also works if recipes are silent; **`OUT=` is preferred**.
+
+Do **not** use `make -n` for captures — that prints the recipe, not the API response.
+
+If an older capture file includes curl/Makefile noise, tools auto-extract JSON via `load_json_document`. To strip noise (and embedded API keys from the recipe):
 
 ```bash
 make json-extract IN=capture.json OUT=clean.json
@@ -129,15 +131,19 @@ Produces a **0–100 overall score** with verdict (`low` / `moderate` / `high` /
 | **headers** | 30% | Anomalies from header analysis (weighted down for recipient MX noise) |
 | **authentication** | 15% | SPF/DKIM/DMARC pass/fail from headers |
 | **infrastructure** | 15% | AbuseIPDB, ipinfo, WHOIS on sender-relevant entities only |
+| **canary** | 10% | Only when `INVESTIGATION=` is provided — trap hits, human vs automation IPs, hitter abuse reports |
 
 ```bash
-# Full pipeline (API runs OSINT, then scores)
-make analyze-eml EML=suspicious.eml > analysis.json
-make report-from-analysis ANALYSIS=analysis.json PRETTY=1
+# Full pipeline — report endpoint runs OSINT internally and embeds it in the JSON
+make prod-analyze-eml EML=suspicious.eml PRETTY=1 OUT=analysis/analysis.json
+make prod-report-from-analysis ANALYSIS=analysis/analysis.json \
+  INVESTIGATION=analysis/investigation.json PRETTY=1 OUT=analysis/report.json
 
-# Score existing analysis + OSINT files
-make osint-from-analysis ANALYSIS=analysis.json > osint.json
-make report-score ANALYSIS=analysis.json OSINT=osint.json PRETTY=1
+# Optional: standalone OSINT file (same enrichment as inside report-from-analysis)
+make prod-osint-from-analysis ANALYSIS=analysis/analysis.json PRETTY=1 OUT=analysis/osint.json
+
+# Score with pre-built analysis + OSINT files
+make prod-report-score ANALYSIS=analysis/analysis.json OSINT=analysis/osint.json PRETTY=1 OUT=analysis/report.json
 
 # CLI only — no server; runs OSINT locally unless --skip-osint
 make local-cli-report ANALYSIS=analysis.json OUT=report.json
@@ -311,12 +317,12 @@ fixtures/           # sample .eml for testing
 
 ## Typical workflow
 
-1. **Analyze** — `make analyze-eml EML=phish.eml PRETTY=1 > analysis.json`
-2. **OSINT** — `make osint-from-analysis ANALYSIS=analysis.json PRETTY=1 > osint.json`
-3. **Report** — `make report-from-analysis ANALYSIS=analysis.json PRETTY=1 > report.json`
-4. **Canary** — `make canary-token TRAP=portfolio` → embed full `https://` link → `make prod-canary-logs`
-5. **Export** — `make prod-canary-export TOKEN=... OUT=investigation.json` after hits land
-6. **Visualize** — `make local-visualize REPORT=investigation.json HTML=investigation.html`
+1. **Analyze** — `make prod-analyze-eml EML=phish.eml PRETTY=1 OUT=analysis/analysis.json`
+2. **Report** — `make prod-report-from-analysis ANALYSIS=analysis/analysis.json PRETTY=1 OUT=analysis/report.json` (includes OSINT + threat score). Add `INVESTIGATION=analysis/investigation.json` when canary export is available.
+3. **OSINT** *(optional)* — `make prod-osint-from-analysis ANALYSIS=analysis/analysis.json PRETTY=1 OUT=analysis/osint.json` if you want a separate OSINT artifact
+4. **Canary** — `make prod-canary-token TRAP=portfolio` → embed full `https://` link → `make prod-canary-logs`
+5. **Export** — `make prod-canary-export TOKEN=... OUT=analysis/investigation.json` after hits land
+6. **Visualize** — `make local-visualize REPORT=analysis/investigation.json HTML=analysis/investigation.html`
 
 ## OpSec notes
 
