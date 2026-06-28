@@ -15,6 +15,7 @@ from app.models.analyze import (
 from app.models.canary_investigation import CanaryInvestigationReport
 from app.models.osint import OSINTQueryResponse
 from app.models.report import CategoryScore, ScoreFinding, ThreatScoreReport
+from app.services.threat_action_plan import build_action_plan
 
 FREE_WEBMAIL_DOMAINS = frozenset(
     {
@@ -46,14 +47,6 @@ CATEGORY_WEIGHTS = {
     "headers": 0.30,
     "authentication": 0.15,
     "infrastructure": 0.15,
-}
-
-CATEGORY_WEIGHTS_WITH_CANARY = {
-    "identity": 0.35,
-    "headers": 0.28,
-    "authentication": 0.15,
-    "infrastructure": 0.12,
-    "canary": 0.10,
 }
 
 # Recipient-side hops often show private IPs; downweight for inbound mail.
@@ -493,6 +486,38 @@ def merge_osint(
     return OSINTQueryResponse(ips=ips, domains=domains, emails=emails)
 
 
+def _canary_profile_countries(investigation: CanaryInvestigationReport) -> set[str]:
+    countries: set[str] = set()
+    for profile in investigation.ip_profiles:
+        ipinfo = profile.osint.get("ipinfo") or {}
+        country = ipinfo.get("country")
+        if isinstance(country, str) and country:
+            countries.add(country.upper())
+    return countries
+
+
+def _canary_engagement_bonus(investigation: CanaryInvestigationReport | None) -> int:
+    """Direct uplift when a trap confirms active adversary engagement."""
+    if investigation is None or investigation.hit_count == 0:
+        return 0
+
+    roles = {profile.role for profile in investigation.ip_profiles}
+    countries = _canary_profile_countries(investigation)
+
+    bonus = 12  # trap fired — link was opened outside your mail client
+
+    if "human_likely" in roles:
+        bonus += 8
+    if "automation_likely" in roles:
+        bonus += 10
+    if "human_likely" in roles and "automation_likely" in roles:
+        bonus += 20  # manual click then cloud/backend fetch
+    if len(countries) >= 2:
+        bonus += 6
+
+    return min(32, bonus)
+
+
 def _canary_findings(investigation: CanaryInvestigationReport | None) -> list[ScoreFinding]:
     if investigation is None or investigation.hit_count == 0:
         return []
@@ -502,7 +527,7 @@ def _canary_findings(investigation: CanaryInvestigationReport | None) -> list[Sc
             category="canary",
             code="canary_trap_triggered",
             severity="high",
-            points=28,
+            points=35,
             message=(
                 f"Canary trap triggered: {investigation.hit_count} hit(s) from "
                 f"{investigation.unique_ip_count} unique IP(s)."
@@ -516,6 +541,42 @@ def _canary_findings(investigation: CanaryInvestigationReport | None) -> list[Sc
         )
     ]
 
+    roles = {profile.role for profile in investigation.ip_profiles}
+    countries = _canary_profile_countries(investigation)
+
+    if "human_likely" in roles and "automation_likely" in roles:
+        findings.append(
+            ScoreFinding(
+                category="canary",
+                code="canary_human_then_automation",
+                severity="critical",
+                points=45,
+                message=(
+                    "Consumer/mobile IP opened the trap, then a cloud/automation IP fetched it — "
+                    "consistent with scam operator workflow (human click + backend fetch)."
+                ),
+                evidence={
+                    "roles": sorted(roles),
+                    "unique_ip_count": investigation.unique_ip_count,
+                },
+            )
+        )
+
+    if len(countries) >= 2:
+        findings.append(
+            ScoreFinding(
+                category="canary",
+                code="canary_multi_country_ops",
+                severity="high",
+                points=22,
+                message=(
+                    f"Canary hits span {len(countries)} countries ({', '.join(sorted(countries))}) — "
+                    "distributed operator infrastructure."
+                ),
+                evidence={"countries": sorted(countries)},
+            )
+        )
+
     for profile in investigation.ip_profiles:
         if profile.role == "human_likely":
             findings.append(
@@ -523,7 +584,7 @@ def _canary_findings(investigation: CanaryInvestigationReport | None) -> list[Sc
                     category="canary",
                     code="canary_human_operator_likely",
                     severity="high",
-                    points=22,
+                    points=28,
                     message=f"Canary opened from consumer/mobile IP {profile.ip} (human-likely).",
                     evidence={"ip": profile.ip, "role": profile.role, "hit_count": profile.hit_count},
                 )
@@ -533,8 +594,8 @@ def _canary_findings(investigation: CanaryInvestigationReport | None) -> list[Sc
                 ScoreFinding(
                     category="canary",
                     code="canary_automation_followup",
-                    severity="medium",
-                    points=14,
+                    severity="high",
+                    points=24,
                     message=f"Canary followed by cloud/automation IP {profile.ip}.",
                     evidence={"ip": profile.ip, "role": profile.role, "hit_count": profile.hit_count},
                 )
@@ -567,6 +628,25 @@ def _canary_findings(investigation: CanaryInvestigationReport | None) -> list[Sc
                     )
                 )
 
+    engagement_bonus = _canary_engagement_bonus(investigation)
+    if engagement_bonus:
+        findings.append(
+            ScoreFinding(
+                category="canary",
+                code="canary_adversary_engagement_confirmed",
+                severity="critical" if engagement_bonus >= 28 else "high",
+                points=engagement_bonus,
+                message=(
+                    f"Confirmed adversary engagement on canary trap (+{engagement_bonus} to overall score)."
+                ),
+                evidence={
+                    "engagement_bonus": engagement_bonus,
+                    "roles": sorted(roles),
+                    "countries": sorted(countries),
+                },
+            )
+        )
+
     return findings
 
 
@@ -577,37 +657,36 @@ def build_threat_report(
     investigation: CanaryInvestigationReport | None = None,
     include_source: bool = False,
 ) -> ThreatScoreReport:
-    weights = CATEGORY_WEIGHTS_WITH_CANARY if investigation else CATEGORY_WEIGHTS
-
     identity = _identity_findings(analysis)
     headers = _header_findings(analysis)
     authentication = _auth_findings(analysis)
     infrastructure = _infrastructure_findings(analysis, osint)
     canary = _canary_findings(investigation)
+    engagement_bonus = _canary_engagement_bonus(investigation)
 
     categories = [
         CategoryScore(
             name="identity",
             score=_category_score(identity),
-            weight=weights["identity"],
+            weight=CATEGORY_WEIGHTS["identity"],
             findings=identity,
         ),
         CategoryScore(
             name="headers",
             score=_category_score(headers),
-            weight=weights["headers"],
+            weight=CATEGORY_WEIGHTS["headers"],
             findings=headers,
         ),
         CategoryScore(
             name="authentication",
             score=_category_score(authentication),
-            weight=weights["authentication"],
+            weight=CATEGORY_WEIGHTS["authentication"],
             findings=authentication,
         ),
         CategoryScore(
             name="infrastructure",
             score=_category_score(infrastructure),
-            weight=weights["infrastructure"],
+            weight=CATEGORY_WEIGHTS["infrastructure"],
             findings=infrastructure,
         ),
     ]
@@ -616,22 +695,29 @@ def build_threat_report(
             CategoryScore(
                 name="canary",
                 score=_category_score(canary),
-                weight=weights["canary"],
+                weight=0.0,
                 findings=canary,
             )
         )
 
-    overall = round(sum(c.score * c.weight for c in categories))
-    overall = _clamp_score(overall)
+    base_overall = round(sum(c.score * c.weight for c in categories))
+    overall = _clamp_score(base_overall + engagement_bonus)
 
     all_findings = identity + headers + authentication + infrastructure + canary
     all_findings.sort(key=lambda f: f.points, reverse=True)
     top = all_findings[:5]
+    verdict = _verdict(overall)
 
     return ThreatScoreReport(
         overall_score=overall,
-        verdict=_verdict(overall),
-        summary=_summary(overall, _verdict(overall), top),
+        verdict=verdict,
+        summary=_summary(overall, verdict, top),
+        action_plan=build_action_plan(
+            verdict=verdict,
+            overall_score=overall,
+            findings=all_findings,
+            investigation=investigation,
+        ),
         from_address=analysis.from_address,
         from_domain=analysis.from_domain,
         subject=analysis.subject,

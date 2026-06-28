@@ -25,7 +25,9 @@ _WRAP_COLUMNS = frozenset(
         "hostname",
         "org",
         "raw",
-        "referer",
+        "action",
+        "reason",
+        "headline",
     }
 )
 
@@ -141,6 +143,20 @@ def threat_report_tables(data: dict[str, Any]) -> dict[str, pd.DataFrame]:
             }
         ]
     )
+
+    plan = data.get("action_plan") or {}
+    if plan:
+        if plan.get("headline"):
+            tables["threat_action_headline"] = pd.DataFrame([{"headline": plan.get("headline")}])
+        plan_rows = [
+            {
+                "priority": item.get("priority"),
+                "action": item.get("action"),
+                "reason": item.get("reason") or "",
+            }
+            for item in plan.get("actions") or []
+        ]
+        tables["threat_action_plan"] = pd.DataFrame(plan_rows)
 
     category_rows = [
         {
@@ -311,6 +327,8 @@ def render_text(report_type: str, tables: dict[str, pd.DataFrame]) -> str:
         "timeline": "Hit timeline",
         "ip_profiles": "IP profiles",
         "threat_overview": "THREAT SCORE",
+        "threat_action_headline": "Recommended actions",
+        "threat_action_plan": "Action plan",
         "threat_categories": "Category scores",
         "threat_findings": "Findings",
         "email_overview": "EMAIL",
@@ -346,6 +364,8 @@ def render_html(report_type: str, tables: dict[str, pd.DataFrame], title: str) -
         "timeline": "Hit timeline",
         "ip_profiles": "IP profiles",
         "threat_overview": "Threat overview",
+        "threat_action_headline": "Recommended actions",
+        "threat_action_plan": "Action plan",
         "threat_categories": "Category scores",
         "threat_findings": "Findings",
         "email_overview": "Email overview",

@@ -26,10 +26,22 @@ class CategoryScore(BaseModel):
     findings: list[ScoreFinding] = Field(default_factory=list)
 
 
+class ThreatActionItem(BaseModel):
+    priority: str  # immediate | recommended | optional
+    action: str
+    reason: str | None = None
+
+
+class ThreatActionPlan(BaseModel):
+    headline: str
+    actions: list[ThreatActionItem] = Field(default_factory=list)
+
+
 class ThreatScoreReport(BaseModel):
     overall_score: int = Field(ge=0, le=100)
     verdict: str
     summary: str
+    action_plan: ThreatActionPlan
     from_address: str | None = None
     from_domain: str | None = None
     subject: str | None = None

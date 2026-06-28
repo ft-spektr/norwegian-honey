@@ -131,7 +131,11 @@ Produces a **0–100 overall score** with verdict (`low` / `moderate` / `high` /
 | **headers** | 30% | Anomalies from header analysis (weighted down for recipient MX noise) |
 | **authentication** | 15% | SPF/DKIM/DMARC pass/fail from headers |
 | **infrastructure** | 15% | AbuseIPDB, ipinfo, WHOIS on sender-relevant entities only |
-| **canary** | 10% | Only when `INVESTIGATION=` is provided — trap hits, human vs automation IPs, hitter abuse reports |
+| **canary** | engagement bonus | When `INVESTIGATION=` is provided — trap hits add an engagement uplift (human + cloud pattern scores highest) |
+
+Verdict bands: **low** &lt;30 · **moderate** 30–54 · **high** 55–74 · **critical** ≥75.
+
+Each report includes an **`action_plan`** with prioritized steps (`immediate` / `recommended` / `optional`) tailored to the verdict and findings (including canary engagement when present).
 
 ```bash
 # Full pipeline — report endpoint runs OSINT internally and embeds it in the JSON
@@ -150,7 +154,7 @@ make local-cli-report ANALYSIS=analysis.json OUT=report.json
 python -m app.cli.threat_report analysis.json --osint osint.json -o report.json
 ```
 
-Report output includes `overall_score`, `verdict`, `summary`, per-category scores, and a flat `findings` list sorted by severity.
+Report output includes `overall_score`, `verdict`, `summary`, `action_plan`, per-category scores, and a flat `findings` list sorted by severity.
 
 ## Canary investigation export
 
@@ -185,7 +189,7 @@ Auto-detects report type and prints:
 | Input | Tables |
 |-------|--------|
 | `investigation.json` | overview, timeline, IP profiles (+ embedded threat/analysis if present) |
-| `report.json` | threat overview, category scores, findings |
+| `report.json` | threat overview, action plan, category scores, findings |
 | `analysis.json` | email overview, received hops, anomalies |
 | OSINT JSON | IPs, domains |
 
